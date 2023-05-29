@@ -11,4 +11,5 @@
 # create train val test splits
 python list_images.py --datasetdir dataset/C 
 
+# preprocess training images
 
