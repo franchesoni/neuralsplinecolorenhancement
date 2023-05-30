@@ -100,6 +100,9 @@ class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
         assert d.shape == (B, M, self.n_knots)
         return torch.cat((d, torch.ones((B, M, 1)), xs_eval), dim=2)
 
+    def forward(self, raw, params):
+        return self.enhance(raw, params)
+
 
 def find_best_knots(raw, target, spline, loss_fn, n_iter=1000, lr=1e-4, verbose=False):
     params = spline.init_params(raw=raw, enh=enh)
@@ -110,10 +113,11 @@ def find_best_knots(raw, target, spline, loss_fn, n_iter=1000, lr=1e-4, verbose=
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, "min", factor=0.5, patience=50, verbose=verbose
     )
+    spline = torch.compile(spline, mode='reduce-overhead')
 
     best_loss = 1e9
     for i in range(n_iter):
-        out = spline.enhance(raw[None], params)
+        out = spline(raw[None], params)
         loss = loss_fn(out, target[None])
         loss.backward()
         optimizer.step()
