@@ -19,7 +19,7 @@ class TrainMIT5KDataset(Dataset):
         image_path = self.image_paths[index]
         target_path = self.target_paths[index]
         image = norm_img(to_tensor(Image.open(image_path)))
-        target = to_tensor(Image.open(target_path)) / 255.0
+        target = to_tensor(Image.open(target_path)) 
         return image, target
 
     def __len__(self):
