@@ -1,13 +1,14 @@
 import time
 from abc import ABC, abstractmethod
 import numpy as np
-from paper.config import DEVICE
+from config import DEVICE
 
 import torch
 from PIL import Image
 
-from splines import BiancoSpline, TPS_RGB_ORDER_2, GaussianSpline, TPS_RGB_ORDER_2_slow_train
-from ptcolor import deltaE94, rgb2lab
+from oldsplines import TPS_RGB_ORDER_2
+# from splines import BiancoSpline, TPS_RGB_ORDER_2, GaussianSpline, TPS_RGB_ORDER_2_slow_train
+# from ptcolor import deltaE94, rgb2lab
 
 
 
@@ -257,10 +258,3 @@ class GaussianOracle(AbstractOracle):
         return params
 
 
-raw = np.asarray( Image.open("raw.jpg") )
-enh = np.asarray( Image.open("target.jpg") )
-
-
-x = TPS_order2_oracle_slow_train().fit(raw, enh)
-
-print(x)

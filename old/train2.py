@@ -2,14 +2,14 @@ from torch.nn import MSELoss
 import pytorch_lightning as pl
 
 
-from model import (
+from old.model import (
     LightningLUTNet,
     AverageGammaLUTNet,
     AdaptiveGammaLUTNet,
     SimplestSpline,
     ThinnestPlateSpline,
 )
-from data import FiveKDataModule
+from old.data import FiveKDataModule
 
 path_to_C = '/home/maxdunitz/Desktop/mlbriefs2/workdir/neural_spline_enhancement/C'
 
