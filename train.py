@@ -6,8 +6,8 @@ from torch.utils.data import DataLoader
 import torchvision
 from abc import ABC, abstractmethod
 from dataset import TrainMIT5KDataset
-from splines import TPS2RGBSpline
-
+from splines import TPS2RGBSpline, TPS2RGBSplineXY
+from config import DATASET_DIR
 
 def fit(
     backbone,
@@ -30,8 +30,8 @@ def fit(
             loss = loss_fn(out_batch, target_batch)
             loss.backward()
             optimizer.step()
-            scheduler.step()
-            # scheduler.step(loss)
+            # scheduler.step()
+            scheduler.step(loss)
 
             logger.add_scalar("train/loss", loss, epoch_idx * len(dataloader) + i)
             pbar.update(1)
@@ -40,14 +40,14 @@ def fit(
             if profiler:
                 # save profiler stats
                 profiler.disable()
-                profiler.dump_stats(f"tests/profiler.prof")
+                profiler.dump_stats(f"profiler.prof")
                 profiler.enable()
     return enhancer
 
 
 if __name__ == "__main__":
-    lr = 5e-5
-    n_knots = 10
+    lr = 5e-4
+    n_knots = 20
     batch_size = 8
     n_epochs = 24
     import cProfile
@@ -59,33 +59,34 @@ if __name__ == "__main__":
     spline = TPS2RGBSpline(n_knots=n_knots)
     n_params = spline.get_n_params()
     torch._dynamo.config.verbose = True
-    spline = torch.compile(spline, mode="reduce-overhead")
+    # spline = torch.compile(spline, mode="reduce-overhead")
 
     resnet = torchvision.models.resnet18(
         weights=torchvision.models.ResNet18_Weights.DEFAULT
     )
     resnet.fc = torch.nn.Linear(512, n_params)
     backbone = resnet
-    backbone = torch.compile(
-        backbone, mode="reduce-overhead", disable=True
-    )  # doesn't work, see https://github.com/pytorch/pytorch/issues/102539
+    # backbone = torch.compile(
+    #     backbone, mode="reduce-overhead", disable=True
+    # )  # doesn't work, see https://github.com/pytorch/pytorch/issues/102539
 
-    dataset = TrainMIT5KDataset(datadir="dataset/C")
+    dataset = TrainMIT5KDataset(datadir=DATASET_DIR)
+    assert len(dataset) > 0, "dataset is empty"
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True
     )
 
     optimizer = torch.optim.SGD(backbone.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=lr,
-        pct_start=0.05,
-        steps_per_epoch=len(dataloader) // batch_size,
-        epochs=n_epochs,
-    )
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #     optimizer, "min", factor=0.5, patience=500, verbose=True
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=lr,
+    #     pct_start=0.05,
+    #     steps_per_epoch=len(dataloader) // batch_size,
+    #     epochs=n_epochs,
     # )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, "min", factor=0.5, patience=50, verbose=True
+    )
 
     loss_fn = torch.nn.MSELoss()
     enhancer = fit(
@@ -101,5 +102,5 @@ if __name__ == "__main__":
     )
 
     pr.disable()
-    pr.dump_stats(f"tests/profiler.prof")
+    pr.dump_stats(f"profiler.prof")
     # breakpoint()

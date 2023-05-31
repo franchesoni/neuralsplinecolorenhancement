@@ -48,9 +48,12 @@ class AdaptiveGamma(AbstractSpline, torch.nn.Module):
 
 
 class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
-    def init_params(self, raw, enh, n_knots=10, lparam=1., d_null=4, **kwargs):
+    def __init__(self, n_knots):
+        super().__init__()
         self.n_knots = n_knots
-        self.d_null = d_null
+        self.n_ch = 3
+
+    def init_params(self, raw, enh, d_null=4, **kwargs):
         self.n_ch = d_null-1
         assert isinstance(raw, torch.Tensor) and isinstance(enh, torch.Tensor)
         assert raw.shape == (self.n_ch, 448, 448)
@@ -72,9 +75,9 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
         ys.requires_grad = True
         xs.requires_grad = True
         print("XS", xs.shape)
-        l = torch.rand(self.n_ch)/10
-        l.requires_grad = True
-        d = {"ys": ys, "xs": xs, "l":l}
+        lparam = torch.rand(self.n_ch)/10
+        lparam.requires_grad = True
+        d = {"ys": ys, "xs": xs, "l":lparam}
         return d
 
     def build_k_train(self, xs_control, lparam):
@@ -88,7 +91,7 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
         d = torch.linalg.norm(
             xs_control[:, :, None] - xs_control[:, None], axis=3
         )
-        d = d + lparam * torch.eye(M)[None]
+        d = d + lparam.reshape(B, 1, 1) * torch.eye(M).reshape(1, M, M)
         top = torch.cat((d, torch.ones((B,M,1)), xs_control), dim=2)
         bottom = torch.cat(
             (
@@ -117,7 +120,7 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
         # params['lambdas'] is (B, n_experts, n_channels, 1);
         # we have n_knots total control points -- the same ones in each
         # channel -- and 3 lambdas
-        assert raw.shape[1:] == (3, 333, 500)
+        assert raw.shape[1:] == (3, 448, 448)
         assert params['xs'].shape[1:] == (self.n_knots, self.n_ch)
         assert params['xs'].shape[0] == raw.shape[0], 'batch size mismatch'
         B, n_channels, H, W = raw.shape
@@ -126,9 +129,9 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
         out = torch.empty_like(fimg)
         K_pred = self.build_k(fimg, params["xs"])
         for i in range(n_channels):
-            lambda_param = params["l"][:, i]  # (B, 1, 1)
+            lambda_param = params["lambdas"][:, i]  # (B, 3) to (B,)
             K_ch_i = self.build_k_train(
-                params["xs"], lparam=lambda_param.reshape(len(lambda_param))
+                params["xs"], lparam=lambda_param
             )
             B, n_knots, n_channels = params["xs"].shape
             zs = torch.zeros((B, n_channels + 1, 1)).requires_grad_()
@@ -137,9 +140,18 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
             out[:, :, i] = out1[..., -1]
         return out.reshape(raw.shape)  # HxWx3
 
-    def forward(self, raw, params):
-        return self.enhance(raw, params)
 
+    def get_params(self, params_tensor):
+        # returns the dict of params from params tensor
+        n_knots = self.n_knots
+        xs = params_tensor[:, :3*n_knots].reshape(-1, n_knots, 3)
+        ys = params_tensor[:, 3*n_knots:6*n_knots].reshape(-1, n_knots, 3)
+        lambdas = params_tensor[:, 6*n_knots:].reshape(-1, 3)
+        return {"xs":xs, "ys":ys, "lambdas":lambdas}
+
+    def get_n_params(self):
+        # returns the number of params given the number of knots
+        return (3*(2*self.n_knots)) + 3
 
 
 
