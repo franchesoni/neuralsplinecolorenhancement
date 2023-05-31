@@ -16,6 +16,19 @@ class AbstractSpline(ABC):
     def enhance(self, raw, params):
         raise NotImplementedError
 
+    @abstractmethod
+    def get_params(self, params_tensor):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_n_params(self, n_knots):
+        # returns the number of params given the number of knots
+        raise NotImplementedError
+
+    def forward(self, raw, params):
+        if not type(params) == dict:
+            params = self.get_params(params)
+        return self.enhance(raw, params)
 
 class AdaptiveGamma(AbstractSpline, torch.nn.Module):
     def init_params(self, initial_value=1, **kwargs):
@@ -26,11 +39,20 @@ class AdaptiveGamma(AbstractSpline, torch.nn.Module):
     def enhance(self, x, params):
         return x ** params["gamma"]
 
+    def get_params(self, params_tensor):
+        # returns the dict of params from params tensor
+        return {"gamma": params_tensor}
+
+    def get_n_params(self):
+        return 1
+
 
 class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
-    def init_params(self, raw, enh, n_knots=10, lparam=1., d_null=4, **kwargs):
+    def __init__(self, n_knots=10):
+        super().__init__()
         self.n_knots = n_knots
-        self.d_null = d_null
+
+    def init_params(self, raw, enh, lparam=1., d_null=4, **kwargs):
         assert isinstance(raw, torch.Tensor) and isinstance(enh, torch.Tensor)
         assert raw.shape == (3, 448, 448)
         with torch.no_grad():
@@ -49,7 +71,7 @@ class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
             K = self.build_k_train(r_img[idxs, :], lparam=lparam)
             print("K", K.shape)
             print("e_img", e_img[idxs, :].shape)
-            y = torch.vstack((e_img[idxs, :], torch.zeros((self.d_null, 3))))
+            y = torch.vstack((e_img[idxs, :], torch.zeros((d_null, 3))))
             alphas = torch.linalg.pinv(K) @ y
         alphas.requires_grad = True
         xs = r_img[idxs, :]
@@ -84,7 +106,7 @@ class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
         # MAYBE THIS RESHAPING IS WRONG
         fimg = raw.reshape(raw.shape[0], -1, raw.shape[3])  # BxMx3, flattened image
         K = self.build_k(fimg, params["xs"])
-        out = K @ params["alphas"]
+        out = K @ params["alphas"]  # B x M x (n_knots+4), B x (n_knots+4) x 3
         return (out.reshape(raw.shape)+raw).permute(0, 3, 1, 2)  # Bx3xHxW
 
     def build_k(self, xs_eval: torch.Tensor, xs_control: torch.Tensor):
@@ -100,8 +122,19 @@ class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
         assert d.shape == (B, M, self.n_knots)
         return torch.cat((d, torch.ones((B, M, 1)), xs_eval), dim=2)
 
-    def forward(self, raw, params):
-        return self.enhance(raw, params)
+    def get_params(self, params_tensor):
+        # returns the dict of params from params tensor
+        n_knots = self.n_knots
+        alphas = params_tensor[:, :3*(n_knots+4)].reshape(-1, n_knots+4, 3)
+        xs = params_tensor[:, 3*(n_knots+4):].reshape(-1, n_knots, 3)
+        return {"alphas": alphas, "xs": xs}
+
+    def get_n_params(self):
+        # returns the number of params given the number of knots
+        return (3*(self.n_knots+4)) + (3*self.n_knots)
+
+
+
 
 
 def find_best_knots(raw, target, spline, loss_fn, n_iter=1000, lr=1e-4, verbose=False):
@@ -137,6 +170,7 @@ def find_best_knots(raw, target, spline, loss_fn, n_iter=1000, lr=1e-4, verbose=
 
 
 if __name__ == "__main__":
+
     # get data
     ds = TrainMIT5KDataset(datadir=DATASET_DIR)
     raw, enh = ds[19]
