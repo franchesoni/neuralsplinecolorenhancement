@@ -89,7 +89,7 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
         # ys is (B, knots)
         # add the two extra knots 0 and 1
         ys = torch.cat([torch.zeros_like(ys[:, :1]), ys, torch.ones_like(ys[:, :1])], dim=1)  # (B, N+2)
-        xs = torch.linspace(0, 1, self.n_knots+2)[None]  # (1, N+2)
+        xs = torch.linspace(0, 1, self.n_knots+2)[None].to(ys.device)  # (1, N+2)
         slopes = torch.diff(ys) / (xs[:, 1] - xs[:, 0])  # (B, N+1)
         out = torch.zeros_like(raw)
         for i in range(1, self.n_knots+2):

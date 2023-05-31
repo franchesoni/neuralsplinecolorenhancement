@@ -1,19 +1,23 @@
+print('importing packages...')
 import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
+from abc import ABC, abstractmethod
+from PIL import Image
+print('importing torch...')
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import torch._dynamo
 from torch.utils.data import DataLoader
 import torchvision
-from PIL import Image
 from torchvision.transforms.functional import to_tensor
-from abc import ABC, abstractmethod
+print('importing local...')
 from dataset import TrainMIT5KDataset
 from splines import TPS2RGBSpline, TPS2RGBSplineXY, SimplestSpline
-from config import DATASET_DIR
+from config import DATASET_DIR, DEVICE
 from ptcolor import squared_deltaE94, rgb2lab
+print('ended imports, starting...')
 
 def fit(
     backbone,
@@ -22,7 +26,7 @@ def fit(
     optimizer,
     scheduler,
     loss_fn,
-    n_epochs=240,
+    n_epochs=144,
     verbose=True,
     profiler=None,
 ):
@@ -30,16 +34,17 @@ def fit(
     val_img = Image.open(Path(DATASET_DIR) / "train" / "raw" / "004999.jpg")
     H, W = val_img.height, val_img.width
     val_img = val_img.resize((448,448))
-    val_img = to_tensor(val_img).unsqueeze(0)  # (1, 3, H, W)
+    val_img = to_tensor(val_img).unsqueeze(0).to(DEVICE)  # (1, 3, H, W)
 
     for epoch_idx in range(n_epochs):
         pbar = tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch_idx}")
         for i, (raw_batch, target_batch) in enumerate(dataloader):
+            raw_batch, target_batch = raw_batch.to(DEVICE), target_batch.to(DEVICE)
             params_tensor_batch = backbone(raw_batch)
             out_batch = spline(raw_batch, params_tensor_batch)
             loss = loss_fn(out_batch, target_batch)
-            loss += (-params_tensor_batch > 0).sum() * 1e-1
-            loss += (params_tensor_batch-1 > 0).sum() * 1e-1
+            loss += (-params_tensor_batch > 0).sum() * 10
+            loss += (params_tensor_batch-1 > 0).sum() * 1
             loss.backward()
             optimizer.step()
             # scheduler.step()
@@ -52,9 +57,9 @@ def fit(
 
 
             with torch.no_grad():
-                if i % 40 == 0:
+                if i % 60 == 0:  # dev
                     params_tensor_batch = backbone(val_img)
-                    ys = np.array(spline.get_params(params_tensor_batch)['ys'][0])
+                    ys = np.array(spline.get_params(params_tensor_batch)['ys'][0].cpu())
                     xs = np.linspace(0, 1, ys.shape[1]+2)
                     plt.figure()
                     plt.plot(xs, [0]+list(ys[0])+[1], c='r')
@@ -85,8 +90,8 @@ def seed_everything(seed):
 if __name__ == "__main__":
     SEED = 0
     lr = 1e-5
-    n_knots = 10
-    batch_size = 16
+    n_knots = 5
+    batch_size = 46
     n_epochs = 24
     import cProfile
 
@@ -95,12 +100,12 @@ if __name__ == "__main__":
     pr = cProfile.Profile()
     pr.enable()
 
-    spline = SimplestSpline(n_knots=n_knots)
+    spline = SimplestSpline(n_knots=n_knots).to(DEVICE)
     n_params = spline.get_n_params()
     torch._dynamo.config.verbose = True
-    spline = torch.compile(spline, mode="reduce-overhead")
+    spline = torch.compile(spline, mode="reduce-overhead", disable=True)
 
-    backbone = torchvision.models.mobilenet_v3_small(num_classes=n_params)
+    backbone = torchvision.models.mobilenet_v3_small(num_classes=n_params).to(DEVICE)
     # net.fc = torch.nn.Linear(512, n_params)
 
 
@@ -109,21 +114,23 @@ if __name__ == "__main__":
     dataset = TrainMIT5KDataset(datadir=DATASET_DIR)
     assert len(dataset) > 0, "dataset is empty"
     dataloader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True
+        dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True
     )
 
     optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
     loss_fn = torch.nn.MSELoss()
-    initial_params = spline.init_params()
+    initial_params_ys = spline.init_params()['ys'].to(DEVICE)
     for i, (raw, enh) in enumerate(dataloader):
+        raw = raw.to(DEVICE)
         params_tensor = backbone(raw)
         est_params = spline.get_params(params_tensor)
-        loss = loss_fn(est_params['ys'], initial_params['ys'])
+        loss = loss_fn(est_params['ys'], initial_params_ys)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         print("iter", i, loss.item())
-        if loss < 0.005:
+        #break  # dev
+        if loss < 0.0005:
             break
 
 
@@ -139,10 +146,10 @@ if __name__ == "__main__":
     #     epochs=n_epochs,
     # )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, "min", factor=0.5, patience=50, verbose=True
+        optimizer, "min", factor=0.75, patience=50, verbose=True
     )
     backbone = torch.compile(
-        backbone, mode="reduce-overhead", disable=False
+        backbone, mode="reduce-overhead", disable=True
     )  # doesn't work, see https://github.com/pytorch/pytorch/issues/102539
 
     enhancer = fit(
@@ -152,7 +159,7 @@ if __name__ == "__main__":
         optimizer,
         scheduler,
         loss_fn,
-        n_epochs=24,
+        n_epochs=n_epochs,
         verbose=True,
         profiler=pr,
     )
