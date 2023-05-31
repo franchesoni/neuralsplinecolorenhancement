@@ -47,6 +47,140 @@ class AdaptiveGamma(AbstractSpline, torch.nn.Module):
         return 1
 
 
+class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
+    def init_params(self, raw, enh, n_knots=10, lparam=1., d_null=4, **kwargs):
+        self.n_knots = n_knots
+        self.d_null = d_null
+        assert isinstance(raw, torch.Tensor) and isinstance(enh, torch.Tensor)
+        print("raw.shape", raw.shape)
+        assert raw.shape == (3, 333, 500)
+        with torch.no_grad():
+            raw = raw.permute(1, 2, 0)  # HxWx3
+            enh = enh.permute(1, 2, 0)  # HxWx3
+
+            r_img = raw.reshape(-1, 3)
+            e_img = enh.reshape(-1, 3)
+            M = len(r_img)
+
+            # choose n_knots random knots
+            print("number knots", self.n_knots, type(self.n_knots))
+
+            idxs = np.arange(M)
+            np.random.shuffle(idxs)
+            idxs = idxs[: self.n_knots]
+            xs = r_img[idxs, :]
+            ys = e_img[idxs, :]
+        ys.requires_grad = True
+        xs.requires_grad = True
+        print("XS", xs.shape)
+        l = torch.rand(3)/10
+        l.requires_grad = True
+        d = {"ys": ys, "xs": xs, "l":l}
+        return d
+
+    def build_k_train(self, xs_control, lparam):
+        # "classic" TPS energy (m=2), null space is just the affine functions span{1, r, g, b}
+        # xs_control : Nx3
+        # xs_eval : Mx3
+        # returns Mx(N+4) matrix
+        B = xs_control.shape[0]
+        M = xs_control.shape[1]
+        dim_null = xs_control.shape[2]+1
+        print("B", B, "M", M, "dim_null", dim_null)
+        d = torch.linalg.norm(
+            xs_control[:, :, None] - xs_control[:, None], axis=3
+        )
+        print("d", d.shape)
+        d = d + lparam * torch.eye(M)[None]
+        print("d", d.shape)
+        print("XS CONTROL", xs_control.shape, "d", d.shape)
+        top = torch.cat((d, torch.ones((B,M,1)), xs_control), dim=2)
+        print("XS CONTROL", xs_control.shape)
+        print("top", top.shape)
+        bottom = torch.cat(
+            (
+                torch.cat((torch.ones(B,1,M), xs_control.permute(0,2,1)), dim=1),
+                torch.zeros((B,dim_null, dim_null))), dim=2
+        
+            )
+        return torch.cat((top, bottom), dim=1)
+
+    def build_k(self, xs_eval: torch.Tensor, xs_control: torch.Tensor):
+        # "classic" TPS energy (m=2), null space is just the affine functions span{1, r, g, b} if for instance the dimension of the null space is 3
+        # xs_control : BxNx3
+        # xs_eval : BxMx3
+        # returns BxMx(N+4) matrix
+        B = xs_eval.shape[0]
+        M = xs_eval.shape[1]
+        print("B", B, "M", M, xs_eval.shape)
+        d = torch.linalg.norm(
+            xs_eval[:, :, None] - xs_control[:, None], axis=3  # B x M x 1 x 3  # B x 1 x N x 3
+        )  # B x M x N
+        assert d.shape == (B, M, self.n_knots)
+        return torch.cat((d, torch.ones((B, M, 1)), xs_eval), dim=2)
+
+    def enhance(self, raw, params):
+        assert raw.shape[1:] == (3, 333, 500)
+        assert params['xs'].shape[1:] == (self.n_knots, 3)
+        assert params['xs'].shape[0] == raw.shape[0], 'batch size mismatch'
+        raw = raw.permute(0, 2, 3, 1)  # HxWx3
+        # MAYBE THIS RESHAPING IS WRONG
+        fimg = raw.reshape(raw.shape[0], -1, raw.shape[3])  # BxMx3, flattened image
+        K = self.build_k(fimg, params["xs"])
+        out = K @ params["alphas"]
+        return (out.reshape(raw.shape)+raw).permute(0, 3, 1, 2)  # Bx3xHxW
+
+
+    def enhance(self, raw, params):
+        # raw is (B, 3, H, W)  params['ys'] is (B, n_experts, n_channels,
+        # n_knots); params['xs'] is (B, n_experts, n_channels, n_knots);
+        # params['lambdas'] is (B, n_experts, n_channels, 1);
+        # we have n_knots total control points -- the same ones in each
+        # channel -- and 3 lambdas
+        assert raw.shape[1:] == (3, 333, 500)
+        assert params['xs'].shape[1:] == (self.n_knots, 3)
+        assert params['xs'].shape[0] == raw.shape[0], 'batch size mismatch'
+        B, n_channels, H, W = raw.shape
+        fimg = raw.clone().reshape(B, H * W, 3)
+        out = torch.empty_like(fimg)
+        for i in range(n_channels):
+            print("params", params["l"].shape)
+            print("B", B)
+            lambda_param = params["l"][:, i]  # (B, 1, 1)
+            K_ch_i = self.build_k_train(
+                params["xs"], lparam=lambda_param.reshape(len(lambda_param))
+            )
+            K_pred_i = self.build_k(fimg, params["xs"])
+            B, _, n_channels, n_knots = params["xs"].shape
+            zs = torch.zeros((B, n_channels + 1, 1)).requires_grad_()
+            ys = params["ys"][:, 0, i].reshape((B, n_knots, 1))
+            out[:, i] = (
+                K_pred_i
+                @ torch.linalg.pinv(K_ch_i)
+                @ (torch.cat((ys, zs), axis=1))
+            )[..., -1]
+        return out.reshape(x.shape)  # HxWx3
+
+    def forward(self, raw, params):
+        return self.enhance(raw, params)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
     def __init__(self, n_knots=10):
         super().__init__()
@@ -92,7 +226,7 @@ class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
         top = torch.hstack((d, torch.ones((M, 1)), xs_control))
         bottom = torch.hstack(
             (
-                torch.vstack((torch.ones((1, M)), xs_control.T)),
+                torch.vstack((torch.ones((1, M)), xs_control.transpose(-1,-2))),
                 torch.zeros((dim_null + 1, dim_null + 1)),
             )
         )
@@ -146,7 +280,7 @@ def find_best_knots(raw, target, spline, loss_fn, n_iter=1000, lr=1e-4, verbose=
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, "min", factor=0.5, patience=50, verbose=verbose
     )
-    spline = torch.compile(spline, mode='reduce-overhead')
+    #spline = torch.compile(spline, mode='reduce-overhead')
 
     best_loss = 1e9
     for i in range(n_iter):
@@ -179,7 +313,7 @@ if __name__ == "__main__":
 
     # spline = AdaptiveGamma()
     # spline = SimplestSpline()
-    spline = TPS2RGBSpline()
+    spline = TPS2RGBSplineXY()
     spline = spline.to(DEVICE)
     # get best knots
     params = find_best_knots(
