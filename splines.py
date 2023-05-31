@@ -47,6 +47,63 @@ class AdaptiveGamma(AbstractSpline, torch.nn.Module):
         return 1
 
 
+class SimplestSpline(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, n_channels=3):
+        super().__init__()
+        self.n_knots = n_knots
+        self.n_channels = n_channels
+        assert self.n_channels >= 3
+
+    def get_n_params(self):
+        return self.n_channels * self.n_knots
+
+    def get_params(self, params_tensor):
+        # params_tensor is (B, n_channels*n_knots)
+        assert params_tensor.shape[-1] == self.get_n_params()
+        B = params_tensor.shape[0]
+        params_tensor = params_tensor.reshape(B, self.n_channels, self.n_knots)
+        params = {"ys": params_tensor}
+        return params
+
+    def init_params(self):
+        ys = torch.linspace(0, 1, self.n_knots+2)[1:-1][None, None]  # (B, n_knots)
+        return {"ys": ys}
+
+    def enhance(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        # something sophisticated
+        if self.n_channels == 3:
+            return self.enhance_RGB(raw, params)
+        raise NotImplementedError("enhancing with arbitrary number of axis isn't implementing")
+
+    def enhance_RGB(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        ys = params['ys']
+        out = raw.clone()
+        for channel_ind in range(raw.shape[1]):
+            out[:, channel_ind] = self.apply_to_one_channel(out[:, channel_ind], ys[:, channel_ind])
+        return out 
+    
+    def apply_to_one_channel(self, raw, ys):
+        # raw is (B, H, W)
+        # ys is (B, knots)
+        # add the two extra knots 0 and 1
+        ys = torch.cat([torch.zeros_like(ys[:, :1]), ys, torch.ones_like(ys[:, :1])], dim=1)  # (B, N+2)
+        xs = torch.linspace(0, 1, self.n_knots+2)[None]  # (1, N+2)
+        slopes = torch.diff(ys) / (xs[:, 1] - xs[:, 0])  # (B, N+1)
+        out = torch.zeros_like(raw)
+        for i in range(1, self.n_knots+2):
+            locations =  (xs[:, i-1, None, None] <= raw) * (raw < xs[:, i, None, None]) 
+            height_to_go = ((xs[:, i, None, None] - raw)  # (B, 1, 1) - (B, H, W) = (B, H, W)
+                            * slopes[:, i-1, None, None]  # (B, 1, 1)
+                            )
+            res = ys[:, i, None, None] - height_to_go
+            out[locations] = res[locations]
+        return out
+
+
+
+
 class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
     def __init__(self, n_knots):
         super().__init__()
