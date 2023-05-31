@@ -3,3 +3,5 @@ dataset/
 tests/
 runs/
 __pycache__/
+runs/
+profiler*
