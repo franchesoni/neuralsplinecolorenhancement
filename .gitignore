@@ -1,3 +1,5 @@
 *.zip/
 dataset/
+tests/
+runs/
 __pycache__/
