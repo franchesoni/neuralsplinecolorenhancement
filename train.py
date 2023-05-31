@@ -90,7 +90,7 @@ def seed_everything(seed):
 if __name__ == "__main__":
     SEED = 0
     lr = 1e-5
-    n_knots = 5
+    n_knots = 8
     batch_size = 46
     n_epochs = 24
     import cProfile
