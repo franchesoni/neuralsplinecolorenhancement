@@ -48,41 +48,73 @@ class AdaptiveGamma(AbstractSpline, torch.nn.Module):
 
 
 class SimplestSpline(AbstractSpline, torch.nn.Module):
-    def __init__(self, n_knots, n_channels=3):
+    def __init__(self, n_knots, A=None):
+        """
+        n_knots: number of knots, without 0,0 and 1,1, int
+        axis: None or 3xA, if None, then RGB, else, each column is an axes"""
         super().__init__()
         self.n_knots = n_knots
-        self.n_channels = n_channels
-        assert self.n_channels >= 3
+        with torch.no_grad():
+            self.A = A  # (3, n_axis)
+            self.n_axis = 3 if A is None else A.shape[1]
+            if A is not None:
+                assert torch.norm(A, dim=0).allclose(torch.ones(self.n_axis)), "axis must be normalized"
+                self.pinv_axis = torch.linalg.pinv(A)  # (n_axis, 3)
 
     def get_n_params(self):
-        return self.n_channels * self.n_knots
+        return self.n_axis * self.n_knots
 
     def get_params(self, params_tensor):
         # params_tensor is (B, n_channels*n_knots)
         assert params_tensor.shape[-1] == self.get_n_params()
         B = params_tensor.shape[0]
-        params_tensor = params_tensor.reshape(B, self.n_channels, self.n_knots)
+        params_tensor = params_tensor.reshape(B, self.n_axis, self.n_knots)
         params = {"ys": params_tensor}
         return params
 
     def init_params(self):
-        ys = torch.linspace(0, 1, self.n_knots+2)[1:-1][None, None]  # (B, n_knots)
+        if self.A is None:
+            ys = torch.linspace(0, 1, self.n_knots+2)[1:-1][None, None]  # (B, n_knots)
+        else:
+            mins = (self.A * (self.A < 0)).sum(dim=0)
+            maxs = (self.A * (self.A > 0)).sum(dim=0)
+            ys = torch.empty(1, self.n_axis, self.n_knots)
+            for i in range(self.n_axis):
+                ys[0,i,:] = torch.linspace(mins[i], maxs[i], self.n_knots+2)[1:-1]
         return {"ys": ys}
 
     def enhance(self, raw, params):
         # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
         # something sophisticated
-        if self.n_channels == 3:
+        if self.A is None:
             return self.enhance_RGB(raw, params)
-        raise NotImplementedError("enhancing with arbitrary number of axis isn't implementing")
+        else:
+            return self.enhance_arbitrary(raw, params)
 
     def enhance_RGB(self, raw, params):
         # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
         ys = params['ys']
         out = raw.clone()
-        for channel_ind in range(raw.shape[1]):
+        for channel_ind in range(self.n_axis):
             out[:, channel_ind] = self.apply_to_one_channel(out[:, channel_ind], ys[:, channel_ind])
         return out 
+
+    def enhance_arbitrary(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        B, C, H, W = raw.shape
+        assert C == 3
+        finput = raw.permute(0, 2, 3, 1)  # (B,H,W,C)
+        finput = finput @ self.A  # (B,H,W,n_axis)
+        finput = finput.permute(0, 3, 1, 2)  # (B,n_axis,H,W)
+        ys = params['ys']
+        estimates = torch.empty((B, self.n_axis, H, W))
+        for axes_ind in range(self.n_axis):
+            estimates[:, axes_ind] = self.apply_to_one_channel(finput[:, axes_ind], ys[:, axes_ind])
+        estimates = estimates.permute(0, 2, 3, 1)  # (B,H,W,n_axis)
+        out = estimates @ self.pinv_axis  # (B,H,W,3)
+        out = out.permute(0, 3, 1, 2)  # (B,3,H,W)
+        return out
+
     
     def apply_to_one_channel(self, raw, ys):
         # raw is (B, H, W)
