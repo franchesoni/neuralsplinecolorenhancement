@@ -58,7 +58,7 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
             self.A = A  # (3, n_axis)
             self.n_axis = 3 if A is None else A.shape[1]
             if A is not None:
-                assert torch.norm(A, dim=0).allclose(torch.ones(self.n_axis)), "axis must be normalized"
+                assert torch.norm(A, dim=0).allclose(torch.ones(self.n_axis, device=A.device)), "axis must be normalized"
                 self.pinv_axis = torch.linalg.pinv(A)  # (n_axis, 3)
 
     def get_n_params(self):
@@ -107,7 +107,7 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
         finput = finput @ self.A  # (B,H,W,n_axis)
         finput = finput.permute(0, 3, 1, 2)  # (B,n_axis,H,W)
         ys = params['ys']
-        estimates = torch.empty((B, self.n_axis, H, W))
+        estimates = torch.empty((B, self.n_axis, H, W), device=finput.device)
         for axes_ind in range(self.n_axis):
             estimates[:, axes_ind] = self.apply_to_one_channel(finput[:, axes_ind], ys[:, axes_ind])
         estimates = estimates.permute(0, 2, 3, 1)  # (B,H,W,n_axis)
