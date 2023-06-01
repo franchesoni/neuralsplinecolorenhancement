@@ -32,6 +32,7 @@ def fit(
     profiler=None,
 ):
     logger = SummaryWriter()
+    logdir = Path(logger.get_logdir())
     val_img = Image.open(Path(DATASET_DIR) / "train" / "raw" / "004999.jpg")
     H, W = val_img.height, val_img.width
     val_img = val_img.resize((448,448))
@@ -66,21 +67,21 @@ def fit(
                     plt.plot(xs, [0]+list(ys[0])+[1], c='r')
                     plt.plot(xs, [0]+list(ys[1])+[1], c='g')
                     plt.plot(xs, [0]+list(ys[2])+[1], c='b')
-                    plt.savefig('params.png')
+                    plt.savefig(logdir / 'params.png')
                     plt.close()
                     out_batch = spline(val_img, params_tensor_batch)  # (1, 3, H, W)
                     out = out_batch[0].permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
                     outimg = Image.fromarray((out * 255).astype("uint8"))
                     outimg = outimg.resize((W, H))
-                    outimg.save('out.jpg')
+                    outimg.save(logdir / 'out.jpg')
 
             if profiler:
                 # save profiler stats
                 profiler.disable()
-                profiler.dump_stats(f"profiler.prof")
+                profiler.dump_stats(logdir / f"profiler.prof")
                 profiler.enable()
 
-        torch.save(backbone.state_dict(), f"backbone_{epoch_idx}.pth")
+        torch.save(backbone.state_dict(), logdir / f"backbone_{epoch_idx}.pth")
     return enhancer
 
 def seed_everything(seed):
@@ -128,7 +129,6 @@ if __name__ == "__main__":
 
     if os.path.isfile("backbone_init.pth") and not reset:
         state_dict = torch.load("backbone_init.pth")
-        breakpoint()
         backbone.load_state_dict(state_dict)
     else:
         optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
