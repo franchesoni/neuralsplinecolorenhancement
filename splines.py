@@ -106,10 +106,6 @@ class NaturalCubicXY(AbstractSpline, torch.nn.Module):
         return torch.cat((top, bottom), dim=1)
 
     def build_k(self, xs_eval: torch.Tensor, xs_control: torch.Tensor):
-        # "classic" TPS energy (m=2), null space is just the affine functions span{1, r, g, b} if for instance the number of channels is 3
-        # xs_control : BxNx3
-        # xs_eval : BxMx3
-        # returns BxMxN matrix
         B = xs_eval.shape[0]
         M = xs_eval.shape[1]
         ms = torch.minimum(xs_control[:,None,:], xs_eval[:,:,None])
@@ -149,15 +145,14 @@ class NaturalCubicXY(AbstractSpline, torch.nn.Module):
 
     def get_params(self, params_tensor):
         # returns the dict of params from params tensor
-        n_knots = self.n_knots
-        xs = params_tensor[:, :3*n_knots].reshape(-1, n_knots, 3)
-        ys = params_tensor[:, 3*n_knots:6*n_knots].reshape(-1, n_knots, 3)
-        lambdas = params_tensor[:, 6*n_knots:].reshape(-1, 3)
+        xs = params_tensor[:, :self.n_ch*self.n_knots].reshape(-1, self.n_knots, self.n_ch)
+        ys = params_tensor[:, self.n_ch*self.n_knots:2*self.n_ch*self.n_knots].reshape(-1, self.n_knots, self.n_ch)
+        lambdas = params_tensor[:, 2*self.n_ch*self.n_knots:].reshape(-1, self.n_ch)
         return {"xs":xs, "ys":ys, "lambdas":lambdas}
 
     def get_n_params(self):
         # returns the number of params given the number of knots
-        return (3*(2*self.n_knots)) + 3
+        return self.n_ch*(2*self.n_knots + 1)
 
 
 class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
