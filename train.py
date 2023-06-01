@@ -64,8 +64,8 @@ def fit(
             params_tensor_batch = backbone(raw_batch)
             out_batch = spline(raw_batch, params_tensor_batch)
             loss = loss_fn(out_batch, target_batch)
-            loss += (-params_tensor_batch > 0).sum() * 10
-            loss += (params_tensor_batch-1 > 0).sum() * 1
+            # loss += (-params_tensor_batch > 0).sum() * 10
+            # loss += (params_tensor_batch-1 > 0).sum() * 1
             loss.backward()
             optimizer.step()
             # scheduler.step()
@@ -78,7 +78,7 @@ def fit(
 
 
             if i % 60 == 0:  # dev
-                validate_image(backbone, val_img, logdir)
+                validate_image(backbone, spline, val_img, logdir)
 
 
             if profiler:
@@ -101,7 +101,7 @@ if __name__ == "__main__":
     n_knots = 8
     batch_size = 46
     n_epochs = 24
-    reset = True
+    reset = False
     import cProfile
 
     seed_everything(SEED)
@@ -158,22 +158,24 @@ if __name__ == "__main__":
 
             torch.save(backbone.state_dict(), "backbone_init.pth")
 
-    class IdentityBackbone(torch.nn.Module):
-        def forward(self, x):
-            return initial_params_ys.reshape(params_tensor.shape[1:])[None]
+    # class IdentityBackbone(torch.nn.Module):
+    #     def forward(self, x):
+    #         return initial_params_ys.reshape(params_tensor.shape[1:])[None]
     
-    idbk = IdentityBackbone().to(DEVICE)
+    # idbk = IdentityBackbone().to(DEVICE)
+
     # validate over one image
     val_img = Image.open(Path(DATASET_DIR) / "train" / "raw" / "004999.jpg")
     H, W = val_img.height, val_img.width
     val_img = val_img.resize((448,448))
     val_img = to_tensor(val_img).unsqueeze(0).to(DEVICE)  # (1, 3, H, W)
-    validate_image(idbk, spline, val_img, Path('identity'))
+    # validate_image(idbk, spline, val_img, Path('identity'))
     validate_image(backbone, spline, val_img, Path('initial'))
 
     def loss_fn(rgb1, rgb2):
         return torch.norm(rgb2lab(rgb1) - rgb2lab(rgb2), dim=1).mean()
         # return squared_deltaE94(rgb2lab(rgb1), rgb2lab(rgb2)).mean()
+
     optimizer = torch.optim.Adam(backbone.parameters(), lr=lr)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
