@@ -60,6 +60,8 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
             if A is not None:
                 assert torch.norm(A, dim=0).allclose(torch.ones(self.n_axis, device=A.device)), "axis must be normalized"
                 self.pinv_axis = torch.linalg.pinv(A)  # (n_axis, 3)
+                self.mins = (self.A * (self.A < 0)).sum(dim=0)  # (n_axis,)
+                self.maxs = (self.A * (self.A > 0)).sum(dim=0)
 
     def get_n_params(self):
         return self.n_axis * self.n_knots
@@ -76,8 +78,7 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
         if self.A is None:
             ys = torch.linspace(0, 1, self.n_knots+2)[1:-1][None, None]  # (B, n_knots)
         else:
-            mins = (self.A * (self.A < 0)).sum(dim=0)
-            maxs = (self.A * (self.A > 0)).sum(dim=0)
+            mins, maxs = self.mins, self.maxs
             ys = torch.empty(1, self.n_axis, self.n_knots)
             for i in range(self.n_axis):
                 ys[0,i,:] = torch.linspace(mins[i], maxs[i], self.n_knots+2)[1:-1]
@@ -109,19 +110,19 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
         ys = params['ys']
         estimates = torch.empty((B, self.n_axis, H, W), device=finput.device)
         for axes_ind in range(self.n_axis):
-            estimates[:, axes_ind] = self.apply_to_one_channel(finput[:, axes_ind], ys[:, axes_ind])
+            estimates[:, axes_ind] = self.apply_to_one_channel(finput[:, axes_ind], ys[:, axes_ind], xsmin=self.mins[axes_ind], xsmax=self.maxs[axes_ind])
         estimates = estimates.permute(0, 2, 3, 1)  # (B,H,W,n_axis)
         out = estimates @ self.pinv_axis  # (B,H,W,3)
         out = out.permute(0, 3, 1, 2)  # (B,3,H,W)
         return out
 
     
-    def apply_to_one_channel(self, raw, ys):
+    def apply_to_one_channel(self, raw, ys, xsmin=0, xsmax=1):
         # raw is (B, H, W)
         # ys is (B, knots)
         # add the two extra knots 0 and 1
         ys = torch.cat([torch.zeros_like(ys[:, :1]), ys, torch.ones_like(ys[:, :1])], dim=1)  # (B, N+2)
-        xs = torch.linspace(0, 1, self.n_knots+2)[None].to(ys.device)  # (1, N+2)
+        xs = torch.linspace(xsmin, xsmax, self.n_knots+2)[None].to(ys.device)  # (1, N+2)
         slopes = torch.diff(ys) / (xs[:, 1] - xs[:, 0])  # (B, N+1)
         out = torch.zeros_like(raw)
         for i in range(1, self.n_knots+2):
