@@ -47,11 +47,124 @@ class AdaptiveGamma(AbstractSpline, torch.nn.Module):
         return 1
 
 
-class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
-    def __init__(self, n_knots):
+
+class NaturalCubicXY(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, nch=3):
         super().__init__()
         self.n_knots = n_knots
-        self.n_ch = 3
+        self.n_ch = nch
+
+    def init_params(self, raw, enh, **kwargs):
+        assert isinstance(raw, torch.Tensor) and isinstance(enh, torch.Tensor)
+        assert raw.shape == (self.n_ch, 448, 448)
+        with torch.no_grad():
+            raw = raw.permute(1, 2, 0)  # HxWx3
+            enh = enh.permute(1, 2, 0)  # HxWx3
+
+            r_img = raw.reshape(-1, self.n_ch)
+            e_img = enh.reshape(-1, self.n_ch)
+            M = len(r_img)
+
+            # choose n_knots random knots
+            idxs = np.arange(M)
+            np.random.shuffle(idxs)
+            idxs = idxs[: self.n_knots]
+            xs = r_img[idxs, :]
+            ys = e_img[idxs, :]
+        ys.requires_grad = True
+        xs.requires_grad = True
+        lparam = torch.rand(self.n_ch)/10
+        lparam.requires_grad = True
+        d = {"ys": ys, "xs": xs, "l":lparam}
+        return d
+
+    def build_k_train(self, xs_control, lparam):
+        '''sets up the linear system in equation (37) for the natural cubic spline on [-1,1]
+        as in algorithm 4, but for index set X=[-1,1]
+        '''
+        B = xs_control.shape[0]
+        M = xs_control.shape[1]
+        ms = torch.minimum(xs_control[:,:,None], xs_control[:,None,:])
+        #x1s, x2s = torch.meshgrid(xs_control, xs_control, indexing='ij')
+
+        # compute the kernel k^1 of H_1 (defined in section 2.6.1) elementwise (order m=2) on X=[-1,1]
+        # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
+        #ms =  d = torch.linalg.norm(
+        #    xs_control[:, :, None] - xs_control[:, None], axis=3
+        #)  #torch.minimum(x1s, x2s)
+        K1 = xs_control[:,:,None]*xs_control[:,None,:]*ms - 0.5*(xs_control[:,:,None]+xs_control[:,None,:])*ms**2 + 1/3.0*ms**3
+        M_ = K1 + lparam[:,None, None]*(torch.eye(xs_control.shape[1])[None,:,:])
+    
+        # complement the Gram matrix of representers of evaluation with nullspace functions ("T" in (37))
+        # the nullspace has orthonormal basis {1, 1+x} (see remark 2.56)
+        top = torch.cat((M_, torch.ones((B,M,1)), xs_control[:,:,None]), dim=2)
+        bottom = torch.cat(
+            (
+                torch.cat((torch.ones(B,1,M), xs_control[:,:,None].permute(0,2,1)), dim=1),
+                torch.zeros((B,2,2))), dim=2
+            )
+        return torch.cat((top, bottom), dim=1)
+
+    def build_k(self, xs_eval: torch.Tensor, xs_control: torch.Tensor):
+        # "classic" TPS energy (m=2), null space is just the affine functions span{1, r, g, b} if for instance the number of channels is 3
+        # xs_control : BxNx3
+        # xs_eval : BxMx3
+        # returns BxMxN matrix
+        B = xs_eval.shape[0]
+        M = xs_eval.shape[1]
+        ms = torch.minimum(xs_control[:,None,:], xs_eval[:,:,None])
+
+        # compute the kernel k^1 of H_1 (defined in section 2.6.1) elementwise (order m=2) on X=[-1,1]
+        # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
+        K1 = xs_control[:,None,:]*xs_eval[:,:,None]*ms - 0.5*(xs_control[:,None,:]+xs_eval[:,:,None])*ms**2 + 1/3.0*ms**3
+
+        assert K1.shape == (B, M, self.n_knots)
+        return torch.cat((K1, torch.ones((B, M, 1)), xs_eval[:,:,None]), dim=2)
+
+    def enhance(self, raw, params):
+        # raw is (B, 3, H, W)  params['ys'] is (B, n_experts, n_channels,
+        # n_knots); params['xs'] is (B, n_experts, n_channels, n_knots);
+        # params['lambdas'] is (B, n_experts, n_channels, 1);
+        # we have n_knots total control points -- the same ones in each
+        # channel -- and 3 lambdas
+        assert raw.shape[1:] == (3, 448, 448)
+        assert params['xs'].shape[1:] == (self.n_knots, self.n_ch)
+        assert params['xs'].shape[0] == raw.shape[0], 'batch size mismatch'
+        B, n_channels, H, W = raw.shape
+        assert n_channels == self.n_ch
+        fimg = raw.clone().reshape(B, H * W, n_channels)
+        out = torch.empty_like(fimg)
+        for i in range(n_channels):
+            lambda_param = params["lambdas"][:, i]  # (B, 3) to (B,)
+            K_pred = self.build_k(fimg[:,:,i], params["xs"][:,:,i])
+            K_ch_i = self.build_k_train(
+                params["xs"][:,:,i], lparam=lambda_param
+            )
+            B, n_knots, n_channels = params["xs"].shape
+            zs = torch.zeros((B, 2, 1)).requires_grad_()
+            ys = params["ys"][:, :, i].reshape((B, n_knots, 1))
+            out1 = K_pred @ torch.linalg.pinv(K_ch_i) @ (torch.cat((ys, zs), axis=1))
+            out[:, :, i] = out1[..., -1]
+        return out.reshape(raw.shape)  # HxWx3
+
+    def get_params(self, params_tensor):
+        # returns the dict of params from params tensor
+        n_knots = self.n_knots
+        xs = params_tensor[:, :3*n_knots].reshape(-1, n_knots, 3)
+        ys = params_tensor[:, 3*n_knots:6*n_knots].reshape(-1, n_knots, 3)
+        lambdas = params_tensor[:, 6*n_knots:].reshape(-1, 3)
+        return {"xs":xs, "ys":ys, "lambdas":lambdas}
+
+    def get_n_params(self):
+        # returns the number of params given the number of knots
+        return (3*(2*self.n_knots)) + 3
+
+
+class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, nch=3):
+        super().__init__()
+        self.n_knots = n_knots
+        self.n_ch = nch
 
     def init_params(self, raw, enh, d_null=4, **kwargs):
         self.n_ch = d_null-1
@@ -74,7 +187,6 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
             ys = e_img[idxs, :]
         ys.requires_grad = True
         xs.requires_grad = True
-        print("XS", xs.shape)
         lparam = torch.rand(self.n_ch)/10
         lparam.requires_grad = True
         d = {"ys": ys, "xs": xs, "l":lparam}
