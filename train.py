@@ -1,4 +1,5 @@
 print('importing packages...')
+import os
 import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
@@ -93,6 +94,7 @@ if __name__ == "__main__":
     n_knots = 8
     batch_size = 46
     n_epochs = 24
+    reset = True
     import cProfile
 
     seed_everything(SEED)
@@ -100,12 +102,19 @@ if __name__ == "__main__":
     pr = cProfile.Profile()
     pr.enable()
 
-    spline = SimplestSpline(n_knots=n_knots).to(DEVICE)
+    A = torch.tensor([[1,0,0], [0,1,0], [0,0,1], [1,1,1], [-1,-1,1], [-1,1,-1], [1,-1,-1]]).float()
+    A = (A / torch.norm(A, dim=1, keepdim=True)).T
+    A = A.to(DEVICE)
+    spline = SimplestSpline(n_knots=n_knots, A=A).to(DEVICE)
     n_params = spline.get_n_params()
     torch._dynamo.config.verbose = True
     spline = torch.compile(spline, mode="reduce-overhead", disable=True)
 
     backbone = torchvision.models.mobilenet_v3_small(num_classes=n_params).to(DEVICE)
+    # current_model_dict = backbone.state_dict()
+    # loaded_state_dict = torch.load("backbone_23.pth", map_location=DEVICE)
+    # new_state_dict={k:v if v.size()==current_model_dict[k].size()  else  current_model_dict[k] for k,v in zip(current_model_dict.keys(), loaded_state_dict.values())}
+    # backbone.load_state_dict(new_state_dict, strict=False)
     # net.fc = torch.nn.Linear(512, n_params)
 
 
@@ -117,22 +126,28 @@ if __name__ == "__main__":
         dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True
     )
 
-    optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
-    loss_fn = torch.nn.MSELoss()
-    initial_params_ys = spline.init_params()['ys'].to(DEVICE)
-    for i, (raw, enh) in enumerate(dataloader):
-        raw = raw.to(DEVICE)
-        params_tensor = backbone(raw)
-        est_params = spline.get_params(params_tensor)
-        loss = loss_fn(est_params['ys'], initial_params_ys)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        print("iter", i, loss.item())
-        #break  # dev
-        if loss < 0.0005:
-            break
+    if os.path.isfile("backbone_init.pth") and not reset:
+        state_dict = torch.load("backbone_init.pth")
+        breakpoint()
+        backbone.load_state_dict(state_dict)
+    else:
+        optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
+        loss_fn = torch.nn.MSELoss()
+        initial_params_ys = spline.init_params()['ys'].to(DEVICE)
+        for i, (raw, enh) in enumerate(dataloader):
+            raw = raw.to(DEVICE)
+            params_tensor = backbone(raw)
+            est_params = spline.get_params(params_tensor)
+            loss = loss_fn(est_params['ys'], initial_params_ys)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            print("iter", i, loss.item())
+            #break  # dev
+            if loss < 0.0005:
+                break
 
+            torch.save(backbone.state_dict(), "backbone_init.pth")
 
     def loss_fn(rgb1, rgb2):
         return torch.norm(rgb2lab(rgb1) - rgb2lab(rgb2), dim=1).mean()
