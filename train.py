@@ -59,42 +59,42 @@ def fit(
 
     running_loss = 0
     for epoch_idx in range(n_epochs):
-        pbar = tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch_idx}")
-        for i, (raw_batch, target_batch) in enumerate(dataloader):
-            raw_batch, target_batch = raw_batch.to(DEVICE), target_batch.to(DEVICE)
-            params_tensor_batch = backbone(raw_batch)
-            out_batch = spline(raw_batch, params_tensor_batch)
-            loss = loss_fn(out_batch, target_batch)
-            # loss += (-params_tensor_batch > 0).sum() * 10
-            # loss += (params_tensor_batch-1 > 0).sum() * 1
-            loss.backward()
-            optimizer.step()
-            # scheduler.step()
-            scheduler.step(loss)
+        with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch_idx}") as pbar:
+            for i, (raw_batch, target_batch) in enumerate(dataloader):
+                raw_batch, target_batch = raw_batch.to(DEVICE), target_batch.to(DEVICE)
+                params_tensor_batch = backbone(raw_batch)
+                out_batch = spline(raw_batch, params_tensor_batch)
+                loss = loss_fn(out_batch, target_batch)
+                # loss += (-params_tensor_batch > 0).sum() * 10
+                # loss += (params_tensor_batch-1 > 0).sum() * 1
+                loss.backward()
+                optimizer.step()
+                # scheduler.step()
+                scheduler.step(loss)
 
-            logger.add_scalar("train/loss", loss, epoch_idx * len(dataloader) + i)
-            # exponential moving average
-            if running_loss == 0:
-                running_loss = loss.item()
-            else:
-                running_loss = 0.9 * running_loss + 0.1 * loss.item()
-            pbar.update(1)
-            pbar.set_postfix({"loss": running_loss, "batch": i})
-
-
-
-            if i % 60 == 0:  # dev
-                validate_image(backbone, spline, val_img, logdir)
+                logger.add_scalar("train/loss", loss, epoch_idx * len(dataloader) + i)
+                # exponential moving average
+                if running_loss == 0:
+                    running_loss = loss.item()
+                else:
+                    running_loss = 0.9 * running_loss + 0.1 * loss.item()
+                pbar.update(1)
+                pbar.set_postfix({"loss": running_loss, "batch": i})
 
 
-            if profiler:
-                # save profiler stats
-                profiler.disable()
-                profiler.dump_stats(logdir / f"profiler.prof")
-                profiler.enable()
 
-        torch.save(backbone.state_dict(), logdir / f"backbone_{epoch_idx}.pth")
-    return enhancer
+                if i % 60 == 0:  # dev
+                    validate_image(backbone, spline, val_img, logdir)
+
+
+                if profiler:
+                    # save profiler stats
+                    profiler.disable()
+                    profiler.dump_stats(logdir / f"profiler.prof")
+                    profiler.enable()
+
+            torch.save(backbone.state_dict(), logdir / f"backbone_{epoch_idx}.pth")
+    return backbone
 
 def seed_everything(seed):
     torch.manual_seed(seed)
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     #     epochs=n_epochs,
     # )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, "min", factor=0.75, patience=50, verbose=True
+        optimizer, "min", factor=0.1, patience=500, verbose=True
     )
     backbone = torch.compile(
         backbone, mode="reduce-overhead", disable=True
