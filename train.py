@@ -20,6 +20,25 @@ from config import DATASET_DIR, DEVICE
 from ptcolor import squared_deltaE94, rgb2lab
 print('ended imports, starting...')
 
+def validate_image(backbone, spline, val_img, logdir):
+    if not os.path.exists(logdir):
+        Path(logdir).mkdir(parents=True, exist_ok=True)
+    with torch.no_grad():
+        params_tensor_batch = backbone(val_img)
+        ys = np.array(spline.get_params(params_tensor_batch)['ys'][0].cpu())
+        xs = np.linspace(0, 1, ys.shape[1]+2)
+        plt.figure()
+        plt.plot(xs, [0]+list(ys[0])+[1], c='r')
+        plt.plot(xs, [0]+list(ys[1])+[1], c='g')
+        plt.plot(xs, [0]+list(ys[2])+[1], c='b')
+        plt.savefig(logdir / 'params.png')
+        plt.close()
+        out_batch = spline(val_img, params_tensor_batch)  # (1, 3, H, W)
+        out = out_batch[0].permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
+        outimg = Image.fromarray((out * 255).astype("uint8"))
+        outimg = outimg.resize((W, H))
+        outimg.save(logdir / 'out.jpg')
+
 def fit(
     backbone,
     spline,
@@ -58,22 +77,9 @@ def fit(
 
 
 
-            with torch.no_grad():
-                if i % 60 == 0:  # dev
-                    params_tensor_batch = backbone(val_img)
-                    ys = np.array(spline.get_params(params_tensor_batch)['ys'][0].cpu())
-                    xs = np.linspace(0, 1, ys.shape[1]+2)
-                    plt.figure()
-                    plt.plot(xs, [0]+list(ys[0])+[1], c='r')
-                    plt.plot(xs, [0]+list(ys[1])+[1], c='g')
-                    plt.plot(xs, [0]+list(ys[2])+[1], c='b')
-                    plt.savefig(logdir / 'params.png')
-                    plt.close()
-                    out_batch = spline(val_img, params_tensor_batch)  # (1, 3, H, W)
-                    out = out_batch[0].permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
-                    outimg = Image.fromarray((out * 255).astype("uint8"))
-                    outimg = outimg.resize((W, H))
-                    outimg.save(logdir / 'out.jpg')
+            if i % 60 == 0:  # dev
+                validate_image(backbone, val_img, logdir)
+
 
             if profiler:
                 # save profiler stats
@@ -103,7 +109,10 @@ if __name__ == "__main__":
     pr = cProfile.Profile()
     pr.enable()
 
-    A = torch.tensor([[1,0,0], [0,1,0], [0,0,1], [1,1,1], [-1,-1,1], [-1,1,-1], [1,-1,-1]]).float()
+    A = torch.tensor([[1,0,0], [0,1,0], [0,0,1]
+                      , [1,1,1]
+                      , [-1,-1,1], [-1,1,-1], [1,-1,-1]
+                      ]).float()
     A = (A / torch.norm(A, dim=1, keepdim=True)).T
     A = A.to(DEVICE)
     spline = SimplestSpline(n_knots=n_knots, A=A).to(DEVICE)
@@ -143,11 +152,24 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
             print("iter", i, loss.item())
-            #break  # dev
+            # break  # dev
             if loss < 0.0005:
                 break
 
             torch.save(backbone.state_dict(), "backbone_init.pth")
+
+    class IdentityBackbone(torch.nn.Module):
+        def forward(self, x):
+            return initial_params_ys.reshape(params_tensor.shape[1:])[None]
+    
+    idbk = IdentityBackbone().to(DEVICE)
+    # validate over one image
+    val_img = Image.open(Path(DATASET_DIR) / "train" / "raw" / "004999.jpg")
+    H, W = val_img.height, val_img.width
+    val_img = val_img.resize((448,448))
+    val_img = to_tensor(val_img).unsqueeze(0).to(DEVICE)  # (1, 3, H, W)
+    validate_image(idbk, spline, val_img, Path('identity'))
+    validate_image(backbone, spline, val_img, Path('initial'))
 
     def loss_fn(rgb1, rgb2):
         return torch.norm(rgb2lab(rgb1) - rgb2lab(rgb2), dim=1).mean()
