@@ -57,6 +57,7 @@ def fit(
     val_img = val_img.resize((448,448))
     val_img = to_tensor(val_img).unsqueeze(0).to(DEVICE)  # (1, 3, H, W)
 
+    running_loss = 0
     for epoch_idx in range(n_epochs):
         pbar = tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch_idx}")
         for i, (raw_batch, target_batch) in enumerate(dataloader):
@@ -72,8 +73,13 @@ def fit(
             scheduler.step(loss)
 
             logger.add_scalar("train/loss", loss, epoch_idx * len(dataloader) + i)
+            # exponential moving average
+            if running_loss == 0:
+                running_loss = loss.item()
+            else:
+                running_loss = 0.9 * running_loss + 0.1 * loss.item()
             pbar.update(1)
-            pbar.set_postfix({"loss": loss.item(), "batch": i})
+            pbar.set_postfix({"loss": running_loss, "batch": i})
 
 
 
