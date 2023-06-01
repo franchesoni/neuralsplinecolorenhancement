@@ -34,7 +34,7 @@ def validate_image(backbone, spline, val_img, logdir):
         plt.savefig(logdir / 'params.png')
         plt.close()
         out_batch = spline(val_img, params_tensor_batch)  # (1, 3, H, W)
-        out = out_batch[0].permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
+        out = np.clip(out_batch[0].permute(1, 2, 0).cpu().numpy(), 0, 1)  # (H, W, 3)
         outimg = Image.fromarray((out * 255).astype("uint8"))
         outimg = outimg.resize((W, H))
         outimg.save(logdir / 'out.jpg')
