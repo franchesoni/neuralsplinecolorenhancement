@@ -1,6 +1,18 @@
 
+# to-do
+franco:
+- retrain from ckpt simplest spline
+- train axis
+
 # results
-simplest with penalty 3 channels 12.08 76
+simplest with penalty 3 channels 12.08 76 val
+simplest with 7 axis 11.33 76 val
+
+- hparams: number nodes, axis
+- training axis or a priori
+- splines (cubic, simplest, gaussian) 1D
+- architecture
+
 
 # Data
 We use MIT 5K with the random250 test split.
