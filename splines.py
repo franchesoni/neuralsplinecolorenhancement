@@ -124,14 +124,15 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
         ys = torch.cat([torch.ones_like(ys[:, :1])*xsmin, ys, torch.ones_like(ys[:, :1])*xsmax], dim=1)  # (B, N+2)
         xs = torch.linspace(xsmin, xsmax, self.n_knots+2)[None].to(ys.device)  # (1, N+2)
         slopes = torch.diff(ys) / (xs[:, 1] - xs[:, 0])  # (B, N+1)
-        out = torch.zeros_like(raw)
+        out = torch.ones_like(raw) * 99  # placeholder
         for i in range(1, self.n_knots+2):
-            locations =  (xs[:, i-1, None, None] <= raw) * (raw < xs[:, i, None, None]) 
+            locations =  (xs[:, i-1, None, None] <= raw) * (raw <= xs[:, i, None, None]) 
             height_to_go = ((xs[:, i, None, None] - raw)  # (B, 1, 1) - (B, H, W) = (B, H, W)
                             * slopes[:, i-1, None, None]  # (B, 1, 1)
                             )
             res = ys[:, i, None, None] - height_to_go
             out[locations] = res[locations]
+        assert not (out == 99).any()
         return out
 
 
