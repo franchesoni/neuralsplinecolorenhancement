@@ -38,9 +38,22 @@ def generate_predictions(
             input_val_img = norm_img(to_tensor(val_img.resize((448,448)))).unsqueeze(0).to(DEVICE)
             params_tensor_batch = backbone(input_val_img)
             out_batch = spline(norm_img(to_tensor(val_img)).unsqueeze(0), params_tensor_batch)
-            outimg = out_batch[0].permute(1,2,0).cpu().numpy()
+            params = spline.get_params(params_tensor_batch)['ys']
+            plt.figure()
+            for axind, axes in enumerate(spline.A.T):
+                plt.plot(
+                    torch.linspace(spline.mins[axind], spline.maxs[axind], spline.n_knots+2),
+                    torch.cat((spline.mins[axind][None], params[0, axind], spline.maxs[axind][None])),
+                    label=axes
+                    )
+            plt.legend()
+            plt.savefig(dstdir / f'params_{val_img_path.name}')
+            plt.close()
+
+            outimg = np.clip(out_batch[0].permute(1,2,0).cpu().numpy(), 0,1)
             out_img = Image.fromarray((outimg*255).astype(np.uint8))
             out_img.save(dstdir / val_img_path.name)
+            
         
 
 def evaluate_predictions(preds_dir: Path, targets_dir: Path, loss_fns: dict):
@@ -101,15 +114,23 @@ def seed_everything(seed):
 if __name__ == "__main__":
     SEED = 0
     n_knots = 8
+    ckptpath = Path("runs/Jun01_19-44-48_weird-power/backbone_23.pth")
+    rundir = Path('aaa')
+    DEVICE = 'cpu'
 
     seed_everything(SEED)
-    spline = SimplestSpline(n_knots=n_knots).to(DEVICE)
+
+    A = torch.tensor([[1,0,0], [0,1,0], [0,0,1]
+                      , [1,1,1]
+                      , [-1,-1,1], [-1,1,-1], [1,-1,-1]
+                      ]).float()
+    A = (A / torch.norm(A, dim=1, keepdim=True)).T
+    A = A.to(DEVICE)
+    spline = SimplestSpline(n_knots=n_knots, A=A).to(DEVICE)
     n_params = spline.get_n_params()
-    torch._dynamo.config.verbose = True
-    spline = torch.compile(spline, mode="reduce-overhead", disable=True)
 
     backbone = torchvision.models.mobilenet_v3_small(num_classes=n_params).to(DEVICE)
-    state_dict = torch.load("backbone_23.pth", map_location=torch.device('cpu'))
+    state_dict = torch.load(ckptpath, map_location=DEVICE)
     backbone.load_state_dict(state_dict)
 
     # net.fc = torch.nn.Linear(512, n_params)
@@ -127,14 +148,15 @@ if __name__ == "__main__":
         backbone, mode="reduce-overhead", disable=True
     )  # doesn't work, see https://github.com/pytorch/pytorch/issues/102539
 
-    # generate_predictions(
-    #     backbone,
-    #     spline,
-    #     dataset,
-    # )
-    loss_fns = {"de76": de76, "de94": de94, "mse": torch.nn.MSELoss()}
-    preds_dir = Path('predictions')
-    targets_dir = Path(DATASET_DIR) / "train" / "target"
-    evaluate_predictions(preds_dir, targets_dir, loss_fns=loss_fns)
-    train_dir = Path(DATASET_DIR) / "train"
-    validate_identity(train_dir, loss_fns=loss_fns)
+    generate_predictions(
+        backbone,
+        spline,
+        dataset,
+        dstdir=rundir,
+    )
+    # loss_fns = {"de76": de76, "de94": de94, "mse": torch.nn.MSELoss()}
+    # preds_dir = Path('predictions')
+    # targets_dir = Path(DATASET_DIR) / "train" / "target"
+    # evaluate_predictions(preds_dir, targets_dir, loss_fns=loss_fns)
+    # train_dir = Path(DATASET_DIR) / "train"
+    # validate_identity(train_dir, loss_fns=loss_fns)

@@ -121,7 +121,7 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
         # raw is (B, H, W)
         # ys is (B, knots)
         # add the two extra knots 0 and 1
-        ys = torch.cat([torch.zeros_like(ys[:, :1]), ys, torch.ones_like(ys[:, :1])], dim=1)  # (B, N+2)
+        ys = torch.cat([torch.ones_like(ys[:, :1])*xsmin, ys, torch.ones_like(ys[:, :1])*xsmax], dim=1)  # (B, N+2)
         xs = torch.linspace(xsmin, xsmax, self.n_knots+2)[None].to(ys.device)  # (1, N+2)
         slopes = torch.diff(ys) / (xs[:, 1] - xs[:, 0])  # (B, N+1)
         out = torch.zeros_like(raw)
