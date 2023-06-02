@@ -37,7 +37,8 @@ def generate_predictions(
         for val_img, val_img_path, _, _ in tqdm.tqdm(dataset):
             input_val_img = norm_img(to_tensor(val_img.resize((448,448)))).unsqueeze(0).to(DEVICE)
             params_tensor_batch = backbone(input_val_img)
-            out_batch = spline(norm_img(to_tensor(val_img)).unsqueeze(0), params_tensor_batch)
+            splineinput = norm_img(to_tensor(val_img)).unsqueeze(0)
+            out_batch = spline(splineinput, params_tensor_batch)
             params = spline.get_params(params_tensor_batch)['ys']
             plt.figure()
             for axind, axes in enumerate(spline.A.T):
@@ -57,7 +58,7 @@ def generate_predictions(
         
 
 def evaluate_predictions(preds_dir: Path, targets_dir: Path, loss_fns: dict):
-    preds_filenames = os.listdir(preds_dir)
+    preds_filenames = [f for f in os.listdir(preds_dir) if f.startswith('00') and f.endswith('jpg')]
     results = {}
     for pred_filename in tqdm.tqdm(preds_filenames):
         pred_img = Image.open(preds_dir / pred_filename)
@@ -148,15 +149,15 @@ if __name__ == "__main__":
         backbone, mode="reduce-overhead", disable=True
     )  # doesn't work, see https://github.com/pytorch/pytorch/issues/102539
 
-    generate_predictions(
-        backbone,
-        spline,
-        dataset,
-        dstdir=rundir,
-    )
-    # loss_fns = {"de76": de76, "de94": de94, "mse": torch.nn.MSELoss()}
-    # preds_dir = Path('predictions')
-    # targets_dir = Path(DATASET_DIR) / "train" / "target"
-    # evaluate_predictions(preds_dir, targets_dir, loss_fns=loss_fns)
+    # generate_predictions(
+    #     backbone,
+    #     spline,
+    #     dataset,
+    #     dstdir=rundir,
+    # )
+    loss_fns = {"de76": de76, "de94": de94, "mse": torch.nn.MSELoss()}
+    preds_dir = Path('aaa')
+    targets_dir = Path(DATASET_DIR) / "train" / "target"
+    evaluate_predictions(preds_dir, targets_dir, loss_fns=loss_fns)
     # train_dir = Path(DATASET_DIR) / "train"
     # validate_identity(train_dir, loss_fns=loss_fns)
