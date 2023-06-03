@@ -145,7 +145,7 @@ if __name__ == "__main__":
     initckpt = "backbone_23.pth"
 
     if os.path.isfile(initckpt) and not reset:
-        state_dict = torch.load(initckpt)
+        state_dict = torch.load(initckpt, map_location=DEVICE)
         backbone.load_state_dict(state_dict)
     else:
         optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
