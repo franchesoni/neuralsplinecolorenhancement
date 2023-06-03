@@ -141,9 +141,11 @@ if __name__ == "__main__":
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True
     )
+    
+    initckpt = "backbone_23.pth"
 
-    if os.path.isfile("backbone_init.pth") and not reset:
-        state_dict = torch.load("backbone_init.pth")
+    if os.path.isfile(initckpt) and not reset:
+        state_dict = torch.load(initckpt)
         backbone.load_state_dict(state_dict)
     else:
         optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
