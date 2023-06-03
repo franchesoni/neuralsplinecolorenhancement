@@ -39,7 +39,7 @@ def validate_image(backbone, A, spline, val_img, logdir):
         for axind, axes in enumerate(A.T):
             plt.plot(
                 torch.linspace(mins[axind], maxs[axind], spline.n_knots+2),
-                torch.cat((mins[axind][None], ys[0, axind], maxs[axind][None])),
+                torch.cat((mins[axind][None], ys[0, axind], maxs[axind][None])).cpu(),
                 label=axes
                 )
         plt.legend()
@@ -55,7 +55,7 @@ def validate_image(backbone, A, spline, val_img, logdir):
 
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-        for axind, axes in enumerate(A.T):
+        for axind, axes in enumerate(A.T.cpu()):
             ax.plot([0, axes[0]], [0, axes[1]], [0, axes[2]], label=[round(e,2) for e in list(axes.numpy())])
         # set the axis labels
         ax.set_xlabel('R')
