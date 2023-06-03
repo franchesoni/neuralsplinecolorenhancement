@@ -15,25 +15,62 @@ import torchvision
 from torchvision.transforms.functional import to_tensor
 print('importing local...')
 from dataset import TrainMIT5KDataset
-from splines import TPS2RGBSpline, TPS2RGBSplineXY, SimplestSpline
+from splines import AxisSimplestSpline, TPS2RGBSpline, TPS2RGBSplineXY, SimplestSpline
 from config import DATASET_DIR, DEVICE
 from ptcolor import squared_deltaE94, rgb2lab
 print('ended imports, starting...')
 
-def validate_image(backbone, spline, val_img, logdir):
+def validate_image(backbone, A, spline, val_img, logdir):
     if not os.path.exists(logdir):
         Path(logdir).mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
+        params = {'A':A}
         params_tensor_batch = backbone(val_img)
-        ys = np.array(spline.get_params(params_tensor_batch)['ys'][0].cpu())
-        xs = np.linspace(0, 1, ys.shape[1]+2)
+        ys = spline.get_params_ys(params_tensor_batch)['ys']  # {'ys':...}
+        params['ys'] = ys
+ 
+
+        # ys = np.array(ys[0].cpu())
+        # xs = np.linspace(0, 1, ys.shape[1]+2)
+        mins = (A * (A < 0)).sum(dim=0)  # (n_axis,)
+        maxs = (A * (A > 0)).sum(dim=0)
+
         plt.figure()
-        plt.plot(xs, [0]+list(ys[0])+[1], c='r')
-        plt.plot(xs, [0]+list(ys[1])+[1], c='g')
-        plt.plot(xs, [0]+list(ys[2])+[1], c='b')
-        plt.savefig(logdir / 'params.png')
+        for axind, axes in enumerate(A.T):
+            plt.plot(
+                torch.linspace(mins[axind], maxs[axind], spline.n_knots+2),
+                torch.cat((mins[axind][None], ys[0, axind], maxs[axind][None])),
+                label=axes
+                )
+        plt.legend()
+        plt.savefig(logdir / f'params.png')
         plt.close()
-        out_batch = spline(val_img, params_tensor_batch)  # (1, 3, H, W)
+
+        # plt.figure()
+        # plt.plot(xs, [0]+list(ys[0])+[1], c='r')
+        # plt.plot(xs, [0]+list(ys[1])+[1], c='g')
+        # plt.plot(xs, [0]+list(ys[2])+[1], c='b')
+        # plt.savefig(logdir / 'params.png')
+        # plt.close()
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        for axind, axes in enumerate(A.T):
+            ax.plot([0, axes[0]], [0, axes[1]], [0, axes[2]], label=[round(e,2) for e in list(axes.numpy())])
+        # set the axis labels
+        ax.set_xlabel('R')
+        ax.set_ylabel('G')
+        ax.set_zlabel('B')
+        plt.legend(bbox_to_anchor=(1.0, 0.5))
+        plt.savefig(logdir / f'axis1.png', bbox_inches='tight')
+        # rotate the view
+        ax.view_init(azim=-45, elev=45)
+        plt.savefig(logdir / f'axis2.png', bbox_inches='tight')
+        ax.view_init(azim=-15, elev=60)
+        plt.savefig(logdir / f'axis3.png', bbox_inches='tight')
+        plt.close()
+
+        out_batch = spline(val_img, params)
         out = np.clip(out_batch[0].permute(1, 2, 0).cpu().numpy(), 0, 1)  # (H, W, 3)
         outimg = Image.fromarray((out * 255).astype("uint8"))
         outimg = outimg.resize((W, H))
@@ -41,6 +78,7 @@ def validate_image(backbone, spline, val_img, logdir):
 
 def fit(
     backbone,
+    A,
     spline,
     dataloader,
     optimizer,
@@ -63,28 +101,37 @@ def fit(
             for i, (raw_batch, target_batch) in enumerate(dataloader):
                 raw_batch, target_batch = raw_batch.to(DEVICE), target_batch.to(DEVICE)
                 params_tensor_batch = backbone(raw_batch)
-                out_batch = spline(raw_batch, params_tensor_batch)
-                loss = loss_fn(out_batch, target_batch)
+                ys = spline.get_params_ys(params_tensor_batch)['ys']  # {'ys':...}
+
+                Areg_loss = ((torch.norm(A, dim=0) - 1)**2).sum()  # unit norm
+
+                params = {'A':A / torch.norm(A, dim=0, keepdim=True), 'ys': ys}
+                out_batch = spline(raw_batch, params)
+                imgdiffloss = loss_fn(out_batch, target_batch)
+                loss = imgdiffloss + Areg_loss
                 # loss += (-params_tensor_batch > 0).sum() * 10
                 # loss += (params_tensor_batch-1 > 0).sum() * 1
+
                 loss.backward()
                 optimizer.step()
                 # scheduler.step()
                 scheduler.step(loss)
 
                 logger.add_scalar("train/loss", loss, epoch_idx * len(dataloader) + i)
+                logger.add_scalar("train/Aregloss", Areg_loss, epoch_idx * len(dataloader) + i)
+                logger.add_scalar("train/imgdiffloss", imgdiffloss, epoch_idx * len(dataloader) + i)
                 # exponential moving average
                 if running_loss == 0:
-                    running_loss = loss.item()
+                    running_loss = imgdiffloss.item()
                 else:
-                    running_loss = 0.9 * running_loss + 0.1 * loss.item()
+                    running_loss = 0.9 * running_loss + 0.1 * imgdiffloss.item()
                 pbar.update(1)
                 pbar.set_postfix({"loss": running_loss, "batch": i})
 
 
 
-                if i % 60 == 0:  # dev
-                    validate_image(backbone, spline, val_img, logdir)
+                # if i % 6 == 0:  # dev
+                #     validate_image(backbone, A, spline, val_img, logdir)
 
 
                 if profiler:
@@ -93,6 +140,7 @@ def fit(
                     profiler.dump_stats(logdir / f"profiler.prof")
                     profiler.enable()
 
+            validate_image(backbone, A, spline, val_img, logdir)
             torch.save(backbone.state_dict(), logdir / f"backbone_{epoch_idx}.pth")
     return backbone
 
@@ -121,8 +169,9 @@ if __name__ == "__main__":
                       ]).float()
     A = (A / torch.norm(A, dim=1, keepdim=True)).T
     A = A.to(DEVICE)
-    spline = SimplestSpline(n_knots=n_knots, A=A).to(DEVICE)
-    n_params = spline.get_n_params()
+    A.requires_grad = True
+    spline = AxisSimplestSpline(n_knots=n_knots, n_axis=A.shape[1]).to(DEVICE)
+    n_params = spline.get_n_params_ys()  # predict only ys not A
     torch._dynamo.config.verbose = True
     spline = torch.compile(spline, mode="reduce-overhead", disable=True)
 
@@ -141,14 +190,17 @@ if __name__ == "__main__":
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True
     )
+    
+    initckpt = "backbone_23.pth"
 
-    if os.path.isfile("backbone_init.pth") and not reset:
-        state_dict = torch.load("backbone_init.pth")
+    if os.path.isfile(initckpt) and not reset:
+        state_dict = torch.load(initckpt, map_location=DEVICE)
         backbone.load_state_dict(state_dict)
     else:
         optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
         loss_fn = torch.nn.MSELoss()
-        initial_params_ys = spline.init_params()['ys'].to(DEVICE)
+        initial_params = spline.init_params(A)
+        initial_params_ys = initial_params['ys'].to(DEVICE)
         for i, (raw, enh) in enumerate(dataloader):
             raw = raw.to(DEVICE)
             params_tensor = backbone(raw)
@@ -175,14 +227,15 @@ if __name__ == "__main__":
     H, W = val_img.height, val_img.width
     val_img = val_img.resize((448,448))
     val_img = to_tensor(val_img).unsqueeze(0).to(DEVICE)  # (1, 3, H, W)
-    # validate_image(idbk, spline, val_img, Path('identity'))
-    validate_image(backbone, spline, val_img, Path('initial'))
+    # validate_image(idbk, A, spline, val_img, Path('identity'))
+    validate_image(backbone, A, spline, val_img, Path('initial'))
+
 
     def loss_fn(rgb1, rgb2):
         return torch.norm(rgb2lab(rgb1) - rgb2lab(rgb2), dim=1).mean()
         # return squared_deltaE94(rgb2lab(rgb1), rgb2lab(rgb2)).mean()
 
-    optimizer = torch.optim.Adam(backbone.parameters(), lr=lr)
+    optimizer = torch.optim.Adam([{'params':backbone.parameters()}, {'params':A}], lr=lr)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
     #     max_lr=lr,
@@ -199,6 +252,7 @@ if __name__ == "__main__":
 
     enhancer = fit(
         backbone,
+        A,
         spline,
         dataloader,
         optimizer,
