@@ -137,6 +137,95 @@ class SimplestSpline(AbstractSpline, torch.nn.Module):
 
 
 
+class AxisSimplestSpline(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, n_axis):
+        """
+        n_knots: number of knots, without 0,0 and 1,1, int
+        axis: None or 3xA, if None, then RGB, else, each column is an axes"""
+        super().__init__()
+        self.n_knots = n_knots
+        self.n_axis = n_axis
+
+    def get_n_params(self):
+        return (self.get_n_params_ys()  # knots
+                + 3 * self.n_axis)  # A
+
+    def get_n_params_ys(self):
+        return self.n_axis * self.n_knots
+
+    def get_params(self, params_tensor):
+        return self.get_params_ys(params_tensor)  # we only return ys, A is given from outside
+
+    def get_params_ys(self, params_tensor):
+        # params_tensor is (B, n_axis*n_knots)
+        assert params_tensor.shape[-1] == self.get_n_params_ys()
+        B = params_tensor.shape[0]
+        params_tensor = params_tensor.reshape(B, self.n_axis, self.n_knots)
+        params = {"ys": params_tensor}
+        return params
+
+    def init_params(self, A=None):
+        with torch.no_grad():
+            if A is None:
+                ys = torch.linspace(0, 1, self.n_knots+2)[1:-1][None, None]  # (B, n_knots)
+            else:
+                mins = (A * (A < 0)).sum(dim=0)  # (n_axis,)
+                maxs = (A * (A > 0)).sum(dim=0)
+                ys = torch.empty(1, self.n_axis, self.n_knots)
+                for i in range(self.n_axis):
+                    ys[0,i,:] = torch.linspace(mins[i], maxs[i], self.n_knots+2)[1:-1]
+        return {"ys": ys, "A":A}
+
+    def enhance(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots), params['A'] is (3, n_axis)
+        assert params['A'].shape[1] == self.n_axis
+        return self.enhance_arbitrary(raw, params)
+
+    def enhance_arbitrary(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        A = params['A']
+        pinv_axis = torch.linalg.pinv(A)  # (n_axis, 3)
+        mins = torch.sum(A * (A < 0), dim=0)  # (n_axis,)
+        maxs = torch.sum(A * (A > 0), dim=0)
+
+        B, C, H, W = raw.shape
+        assert C == 3
+        finput = raw.permute(0, 2, 3, 1)  # (B,H,W,C)
+        finput = finput @ A  # (B,H,W,n_axis)
+        finput = finput.permute(0, 3, 1, 2)  # (B,n_axis,H,W)
+        ys = params['ys']
+        estimates = torch.empty((B, self.n_axis, H, W), device=finput.device)
+        for axes_ind in range(self.n_axis):
+            estimates[:, axes_ind] = self.apply_to_one_channel(finput[:, axes_ind], ys[:, axes_ind],
+                                                               xsmin=mins[axes_ind], xsmax=maxs[axes_ind])
+        estimates = estimates.permute(0, 2, 3, 1)  # (B,H,W,n_axis)
+        out = estimates @ pinv_axis  # (B,H,W,3)
+        # Image.fromarray((np.clip(out[0].detach().numpy(),0,1)*255).astype(np.uint8)).show()
+        out = out.permute(0, 3, 1, 2)  # (B,3,H,W)
+        return out
+
+    
+    def apply_to_one_channel(self, raw, ys, xsmin=0, xsmax=1):
+        # raw is (B, H, W)
+        # ys is (B, knots)
+        # add the two extra knots 0 and 1
+        ys = torch.cat([torch.ones_like(ys[:, :1])*xsmin, ys, torch.ones_like(ys[:, :1])*xsmax], dim=1)  # (B, N+2)
+        xs = torch.linspace(0, 1, self.n_knots+2, device=ys.device)[None] * (xsmax - xsmin) + xsmin
+        # xs = torch.linspace(xsmin, xsmax, self.n_knots+2, requires_grad=True)[None].to(ys.device)  # (1, N+2)
+        slopes = torch.diff(ys) / (xs[:, 1] - xs[:, 0])  # (B, N+1)
+        out = torch.ones_like(raw) * 99  # placeholder
+        for i in range(1, self.n_knots+2):
+            locations =  (xs[:, i-1, None, None] <= raw) * (raw <= xs[:, i, None, None]) 
+            height_to_go = ((xs[:, i, None, None] - raw)  # (B, 1, 1) - (B, H, W) = (B, H, W)
+                            * slopes[:, i-1, None, None]  # (B, 1, 1)
+                            )
+            res = ys[:, i, None, None] - height_to_go
+            out[locations] = res[locations]
+        assert not (out == 99).any()
+        return out
+
+
+
 
 class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
     def __init__(self, n_knots):
