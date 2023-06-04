@@ -1,8 +1,8 @@
-
 # to-do
-franco:
-- retrain from ckpt simplest spline
-- train axis
+- 3d lut oracle
+- demo competitors (inference one image given path)
+- eval competitors 
+
 
 # results
 simplest with penalty 3 channels 12.08 76 val
