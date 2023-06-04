@@ -103,8 +103,8 @@ def seed_everything(seed):
 
 if __name__ == "__main__":
     SEED = 0
-    lr = 1e-5
-    n_knots = 8
+    lr = 1e-6
+    n_knots = 3
     batch_size = 4
     n_epochs = 24
     reset = False
@@ -150,18 +150,18 @@ if __name__ == "__main__":
     else:
         optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
         loss_fn = torch.nn.MSELoss()
-        initial_params_ys = spline.init_params()['ys'].to(DEVICE)
+        initial_params_ys = spline.init_params()['xs'].to(DEVICE)
         for i, (raw, enh) in enumerate(dataloader):
             raw = raw.to(DEVICE)
             params_tensor = backbone(raw)
             est_params = spline.get_params(params_tensor)
-            loss = loss_fn(est_params['ys'], initial_params_ys)
+            loss = loss_fn(est_params['xs'], initial_params_ys) + loss_fn(est_params['ys'], initial_params_ys) + loss_fn(est_params['lambdas'], torch.tensor(0.1))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             print("iter", i, loss.item())
             # break  # dev
-            if loss < 0.0005:
+            if loss < 0.005:
                 break
 
             torch.save(backbone.state_dict(), "backbone_init.pth")
