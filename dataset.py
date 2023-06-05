@@ -51,3 +51,24 @@ class ValMIT5KDataset(Dataset):
 
     def __len__(self):
         return len(self.image_paths)
+
+class TestMIT5KDataset(Dataset):
+    def __init__(self, datadir):
+        self.datadir = Path(datadir)
+        with open(self.datadir / "test_images.txt") as f:
+            test_images = f.read().splitlines()
+        self.image_paths = sorted([self.datadir / "test" / "raw" / testimgname for testimgname in test_images])
+        self.target_paths = sorted([self.datadir / "test" / "target" / testimgname for testimgname in test_images])
+        assert [ipath.name for ipath in self.image_paths] == [
+            tpath.name for tpath in self.target_paths
+        ]
+
+    def __getitem__(self, index):
+        image_path = self.image_paths[index]
+        target_path = self.target_paths[index]
+        image = Image.open(image_path)
+        target = Image.open(target_path)
+        return image, image_path, target, target_path
+
+    def __len__(self):
+        return len(self.image_paths)
