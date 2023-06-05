@@ -21,6 +21,7 @@ from config import DATASET_DIR, DEVICE
 from dataset import ValMIT5KDataset, norm_img
 from ptcolor import rgb2lab, squared_deltaE94
 from splines import SimplestSpline
+from evaluation import evaluate_predictions
 
 print("ended imports, starting...")
 
@@ -56,25 +57,6 @@ def generate_predictions(
             out_img.save(dstdir / val_img_path.name)
             
         
-
-def evaluate_predictions(preds_dir: Path, targets_dir: Path, loss_fns: dict):
-    preds_filenames = [f for f in os.listdir(preds_dir) if f.startswith('00') and f.endswith('jpg')]
-    results = {}
-    for pred_filename in tqdm.tqdm(preds_filenames):
-        pred_img = Image.open(preds_dir / pred_filename)
-        if (targets_dir / pred_filename).is_file():
-            target_img = Image.open(targets_dir / pred_filename)
-        else:
-            print(f"target for {pred_filename} not found")
-            continue
-        pred_img, target_img = norm_img(to_tensor(pred_img))[None], to_tensor(target_img)[None]
-        results[pred_filename] = {}
-        for loss_name, loss_fn in loss_fns.items():
-            results[pred_filename][loss_name] = loss_fn(pred_img, target_img)
-        # print(pred_filename, results[pred_filename])
-    print('='*20)
-    for loss_name in loss_fns.keys():
-        print(loss_name, np.mean([results[fn][loss_name] for fn in results]))
 
 
 def validate_identity(train_dir: Path, loss_fns: dict):
@@ -139,12 +121,6 @@ if __name__ == "__main__":
     dataset = ValMIT5KDataset(datadir=DATASET_DIR)
     assert len(dataset) > 0, "dataset is empty"
 
-    def de76(rgb1, rgb2):
-        return torch.norm(rgb2lab(rgb1) - rgb2lab(rgb2), dim=1).mean()
-
-    def de94(rgb1, rgb2):
-        return squared_deltaE94(rgb2lab(rgb1), rgb2lab(rgb2)).mean()
-
     backbone = torch.compile(
         backbone, mode="reduce-overhead", disable=True
     )  # doesn't work, see https://github.com/pytorch/pytorch/issues/102539
@@ -155,7 +131,6 @@ if __name__ == "__main__":
     #     dataset,
     #     dstdir=rundir,
     # )
-    loss_fns = {"de76": de76, "de94": de94, "mse": torch.nn.MSELoss()}
     preds_dir = Path('aaa')
     targets_dir = Path(DATASET_DIR) / "train" / "target"
     evaluate_predictions(preds_dir, targets_dir, loss_fns=loss_fns)
