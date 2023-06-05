@@ -5,6 +5,7 @@ runs/
 __pycache__/
 runs/
 profiler*
+env*/
 *.pth
 *.jpg
 *.png
