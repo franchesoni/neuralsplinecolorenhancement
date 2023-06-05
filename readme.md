@@ -6,7 +6,8 @@ franco:
 
 # results
 simplest with penalty 3 channels 12.08 76 val
-simplest with 7 axis 11.33 76 val
+simplest with 7 axis 11.33 76 val (runs/Jun02_17-30-07_weird-power)
+
 
 - hparams: number nodes, axis
 - training axis or a priori
