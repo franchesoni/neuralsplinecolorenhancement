@@ -5,7 +5,7 @@ import torch
 
 print("importing local...")
 from config import DATASET_DIR, DEVICE
-from dataset import ValMIT5KDataset, norm_img
+from dataset import TestMIT5KDataset, ValMIT5KDataset, norm_img
 from ptcolor import rgb2lab, squared_deltaE94
 
 from competitors.inference import (
@@ -51,7 +51,8 @@ def generate_predictions(
 
 
 if __name__ == '__main__':
-    dataset = ValMIT5KDataset(datadir=DATASET_DIR)
+    # dataset = ValMIT5KDataset(datadir=DATASET_DIR)
+    dataset = TestMIT5KDataset(datadir=DATASET_DIR)
     assert len(dataset) > 0, "dataset is empty"
 
     def de76(rgb1, rgb2):
