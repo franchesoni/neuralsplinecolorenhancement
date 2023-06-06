@@ -156,7 +156,7 @@ if __name__ == "__main__":
             raw = raw.to(DEVICE)
             params_tensor = backbone(raw)
             est_params = spline.get_params(params_tensor)
-            loss = loss_fn(est_params['xs'], initial_params_ys) + loss_fn(est_params['ys'], initial_params_ys) + loss_fn(est_params['lambdas'], torch.tensor(0.1))
+            loss = loss_fn(est_params['xs'], initial_params_ys) + loss_fn(est_params['ys'], initial_params_ys) + loss_fn(est_params['lambdas'], torch.tensor(0.1).to(DEVICE))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
