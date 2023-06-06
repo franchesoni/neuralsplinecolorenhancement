@@ -227,8 +227,6 @@ class AxisSimplestSpline(AbstractSpline, torch.nn.Module):
 
 ## NATURAL CUBIC SPLINE WITH ARBITRARY AXIS, LEARN CONTROL POINTS XS, YS AND LAMBDAS
 
-
-
 class NaturalCubicArbitraryXY(AbstractSpline, torch.nn.Module):
     def __init__(self, n_knots, A=None):
         super().__init__()
@@ -361,13 +359,140 @@ class NaturalCubicArbitraryXY(AbstractSpline, torch.nn.Module):
         ys = ys.reshape((B, self.n_knots, 1))
         return  kp @ torch.linalg.pinv(kt) @ (torch.cat((ys, zs), axis=1))
 
+## NATURAL CUBIC SPLINE, LEARN CONTROL POINTS YS AND LAMBDAS
 
+class NaturalCubicArbitraryY(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, lparam=None, A=None):
+        super().__init__()
+        self.n_knots = n_knots
+        if lparam is None:
+            lparam = torch.tensor(self.n_knots*[0.1])
+        self.lparam = lparam
+        if A is None:
+            self.n_ch = 3
+            self.A = np.eye(3)
+            if lparam is None:
+                lparam = torch.tensor(self.n_knots*[0.1])
+            self.lparam = lparam
+        else:
+            with torch.no_grad():
+                self.A = A
+                _, self.n_ch = A.shape
+                assert torch.norm(A, dim=0).allclose(torch.ones(self.n_ch, device=A.device)), "axis must be normalized"
+                self.pinv_axis = torch.linalg.pinv(A)  # (n_axis, 3)
+                self.mins = (self.A * (self.A < 0)).sum(dim=0)  # (n_axis,)
+                self.maxs = (self.A * (self.A > 0)).sum(dim=0)
+                self.xs = torch.empty(1, self.n_ch, self.n_knots)
+                for i in range(self.n_ch):
+                    self.xs[0,i,:] = torch.linspace(self.mins[i], self.maxs[i], self.n_knots+2)[1:-1]
+                self.Ks_train = [None]*self.n_ch
+                self.Ks_pinv = [None]*self.n_ch
+                if lparam is None:
+                    lparam = torch.tensor(self.n_knots*[0.1])
+                    self.lparam = lparam
+                for i in range(self.n_ch):
+                    self.Ks_train[i] = self.build_k_train(self.xs[:,i,:], lparam=lparam[i], min_val=self.mins[i])
+                    self.Ks_pinv[i] = torch.linalg.pinv(self.Ks_train[i])
 
+    def init_params(self):
+        if self.A is None:
+            ys = torch.linspace(0, 1, self.n_knots+2)[1:-1][None, None]  # (B, n_knots)
+        else:
+            mins, maxs = self.mins, self.maxs
+            ys = torch.empty(1, self.n_ch, self.n_knots)
+            for i in range(self.n_ch):
+                ys[0,i,:] = torch.linspace(mins[i], maxs[i], self.n_knots+2)[1:-1]
 
+        return {"ys": ys}
 
+    def get_n_params(self):
+        return self.n_ch * self.n_knots
 
+    def get_params(self, params_tensor):
+        # params_tensor is (B, n_channels*n_knots)
+        assert params_tensor.shape[-1] == self.get_n_params()
+        B = params_tensor.shape[0]
+        params_tensor_y = params_tensor[:, :self.n_ch*self.n_knots].reshape(B, self.n_ch, self.n_knots)
+        params = {"ys": params_tensor_y}
+        return params
+    def enhance(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        # something sophisticated
+        if self.A is None:
+            return self.enhance_RGB(raw, params)
+        else:
+            return self.enhance_arbitrary(raw, params)
 
+    def enhance_arbitrary(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        B, C, H, W = raw.shape
+        assert C == 3
+        finput = raw.permute(0, 2, 3, 1)  # (B,H,W,C)
+        finput = finput @ self.A  # (B,H,W,n_axis)
+        finput = finput.permute(0, 3, 1, 2)  # (B,n_axis,H,W)
+        ys = params['ys']
+        ls = self.lparam
+        xs = torch.empty(1, self.n_ch, self.n_knots)
+        estimates = torch.empty((B, self.n_ch, H, W), device=finput.device)
+        for axes_ind in range(self.n_ch):
+            xs[0,axes_ind,:] = torch.linspace(self.mins[axes_ind], self.maxs[axes_ind], self.n_knots+2)[1:-1]
+            estimates[:, axes_ind, :, :] = self.apply_to_one_channel(axes_ind, finput[:, axes_ind], xs[:, axes_ind], ys[:, axes_ind], ls[axes_ind], xsmin=self.mins[axes_ind], xsmax=self.maxs[axes_ind]).reshape(B,H,W)
+        estimates = estimates.permute(0, 2, 3, 1)  # (B,H,W,n_axis)
+        out = estimates @ self.pinv_axis  # (B,H,W,3)
+        out = out.permute(0, 3, 1, 2)  # (B,3,H,W)
+        return out
 
+    def apply_to_one_channel(self, axes_ind, raw, xs, ys, ls, xsmin=0, xsmax=1):
+        # raw is (B, H, W)
+        # ys is (B, knots)
+        # add the two extra knots 0 and 1
+        B = raw.shape[0]
+        kt = self.build_k_train(xs, ls, xsmin)
+        kp = self.build_k(raw, xs, xsmin)
+        out = torch.ones_like(raw) * 99  # placeholder
+        B = raw.shape[0]
+        zs = torch.zeros((B, 2, 1)).requires_grad_()
+        ys = ys.reshape((B, self.n_knots, 1))
+        return  kp @ self.Ks_pinv[axes_ind] @ (torch.cat((ys, zs), axis=1))
+
+    def build_k_train(self, xs_control, lparam, min_val=0):
+        '''sets up the linear system in equation (37) for the natural cubic spline on [-1,1]
+        as in algorithm 4, but for index set X=[-1,1]
+        '''
+        B = xs_control.shape[0]
+        M = xs_control.shape[1]
+        ms = torch.minimum(xs_control[:,:,None], xs_control[:,None,:])
+        #x1s, x2s = torch.meshgrid(xs_control, xs_control, indexing='ij')
+
+        # compute the kernel k^1 of H_1 (defined in section 2.6.1) elementwise (order m=2) on X=[-1,1]
+        # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
+        #ms =  d = torch.linalg.norm(
+        #    xs_control[:, :, None] - xs_control[:, None], axis=3
+        #)  #torch.minimum(x1s, x2s)
+        K1 = xs_control[:,:,None]*xs_control[:,None,:]*(ms-min_val) - 0.5*(xs_control[:,:,None]+xs_control[:,None,:])*(ms+min_val)**2 + 1/3.0*(ms-min_val)**3
+        M_ = K1 + lparam*(torch.eye(xs_control.shape[1])[None,:,:])
+        # complement the Gram matrix of representers of evaluation with nullspace functions ("T" in (37))
+        # the nullspace has orthonormal basis {1, 1+x} (see remark 2.56)
+        top = torch.cat((M_, torch.ones((B,M,1)), xs_control[:,:,None]), dim=2)
+        bottom = torch.cat(
+            (
+                torch.cat((torch.ones(B,1,M), xs_control[:,:,None].permute(0,2,1)-min_val), dim=1),
+                torch.zeros((B,2,2))), dim=2
+            )
+        return torch.cat((top, bottom), dim=1)
+
+    def build_k(self, xs_eval: torch.Tensor, xs_control: torch.Tensor, min_val=0):
+        _, M = xs_control.shape
+        B = xs_eval.shape[0]
+        H, W = xs_eval.shape[1], xs_eval.shape[2]
+        xe2 = xs_eval.clone().reshape(B, H * W)
+        ms = torch.minimum(xs_control[:,None,:], xe2[:,:,None])
+
+        # compute the kernel k^1 of H_1 (defined in section 2.6.1) elementwise (order m=2) on X=[-1,1]
+        # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
+        K1 = xs_control[:,None,:]*xe2[:,:,None]*(ms-min_val) - 0.5*(xs_control[:,None,:]+xe2[:,:,None])*(ms+min_val)**2 + 1/3.0*(ms-min_val)**3
+        assert K1.shape == (B, H*W, self.n_knots)
+        return torch.cat((K1, torch.ones((B, H*W, 1)), xe2[:,:,None]), dim=2)
 
 
 
