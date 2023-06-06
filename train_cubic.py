@@ -102,6 +102,7 @@ def seed_everything(seed):
     np.random.seed(seed)
 
 if __name__ == "__main__":
+    print('init params...')
     SEED = 0
     lr = 1e-6
     n_knots = 4
@@ -115,6 +116,7 @@ if __name__ == "__main__":
     pr = cProfile.Profile()
     pr.enable()
 
+    print('init spline...')
     A = torch.tensor([[1,0,0], [0,1,0], [0,0,1]
                       , [1,1,1]
                       , [-1,-1,1], [-1,1,-1], [1,-1,-1]
@@ -126,6 +128,7 @@ if __name__ == "__main__":
     torch._dynamo.config.verbose = True
     spline = torch.compile(spline, mode="reduce-overhead", disable=True)
 
+    print('init backbone...')
     backbone = torchvision.models.mobilenet_v3_small(num_classes=n_params).to(DEVICE)
     # current_model_dict = backbone.state_dict()
     # loaded_state_dict = torch.load("backbone_23.pth", map_location=DEVICE)
@@ -133,15 +136,15 @@ if __name__ == "__main__":
     # backbone.load_state_dict(new_state_dict, strict=False)
     # net.fc = torch.nn.Linear(512, n_params)
 
-
+    print('init dataset...')
     dataset = TrainMIT5KDataset(datadir=DATASET_DIR)
     assert len(dataset) > 0, "dataset is empty"
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True
     )
     
+    print('init weights...')
     initckpt = "backbone_init_cubic.pth"
-
     if os.path.isfile(initckpt) and not reset:
         state_dict = torch.load(initckpt, map_location=DEVICE)
         backbone.load_state_dict(state_dict)
@@ -170,6 +173,7 @@ if __name__ == "__main__":
     
     # idbk = IdentityBackbone().to(DEVICE)
 
+    print('validate weights...')
     # validate over one image
     val_img = Image.open(Path(DATASET_DIR) / "train" / "raw" / "004999.jpg")
     H, W = val_img.height, val_img.width
@@ -182,6 +186,7 @@ if __name__ == "__main__":
         return torch.norm(rgb2lab(rgb1) - rgb2lab(rgb2), dim=1).mean()
         # return squared_deltaE94(rgb2lab(rgb1), rgb2lab(rgb2)).mean()
 
+    print('fit...')
     optimizer = torch.optim.Adam(backbone.parameters(), lr=lr)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
