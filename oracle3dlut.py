@@ -9,7 +9,7 @@ from jax import jit, vmap, devices
 from PIL import Image
 
 from config import DATASET_DIR, DEVICE
-from dataset import ValMIT5KDataset
+from dataset import TestMIT5KDataset, ValMIT5KDataset
 #  ENH_DIR, RAW_DIR, RES_DIR
 
 
@@ -72,9 +72,10 @@ def trilinear(rgb, xs, ys, T):
 
 
 
-jit_vmap_trilinear = jit(vmap(trilinear, in_axes=[0, None, None, None]), device=devices(
-  'gpu' if DEVICE == 'cuda' else 'cpu'
-  )[0])
+jit_vmap_trilinear = jit(vmap(trilinear, in_axes=[0, None, None, None]))
+# , device=devices(
+#   'cpu''gpu' if DEVICE == 'cuda' else 'cpu'
+#   )[0])
 # pmap_vmap_trilinear = pmap(vmap(trilinear, in_axes=[0, None, None, None]),
 #                         in_axes=[0, None, None, None])
 
@@ -112,7 +113,8 @@ def ptensor(x):
 
  
 if __name__ == '__main__':
-    dataset = ValMIT5KDataset(datadir=DATASET_DIR)
+    # dataset = ValMIT5KDataset(datadir=DATASET_DIR)
+    dataset = TestMIT5KDataset(datadir=DATASET_DIR)
     # img, img path, target ,target path
     
     for ind, sample in tqdm.tqdm(enumerate(dataset)):
