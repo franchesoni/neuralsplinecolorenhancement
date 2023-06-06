@@ -15,22 +15,29 @@ import torchvision
 from torchvision.transforms.functional import to_tensor
 print('importing local...')
 from dataset import TrainMIT5KDataset
-from splines import TPS2RGBSpline, TPS2RGBSplineXY, NaturalCubic, NaturalCubicArbitraryXY
+from splines import TPS2RGBSpline, TPS2RGBSplineXY, NaturalCubic, NaturalCubicArbitraryXY, NaturalCubicArbitraryY
 from config import DATASET_DIR, DEVICE
 from ptcolor import squared_deltaE94, rgb2lab
 print('ended imports, starting...')
 
-def validate_image(backbone, spline, val_img, logdir):
+def validate_image(backbone, spline, val_img, logdir, A=np.eye(3)):
     if not os.path.exists(logdir):
         Path(logdir).mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         params_tensor_batch = backbone(val_img)
         ys = np.array(spline.get_params(params_tensor_batch)['ys'][0].cpu())
-        xs = np.linspace(0, 1, ys.shape[1]+2)
+        if type(A) != type(np.eye(3)):
+            A = A.numpy()
+        print("A", A.shape)
+        maxes = np.sum(np.abs(A), axis=0)
+        mins = np.sum(A*(A<0), axis=0)
+        nch, nax = A.shape
+        xs = np.linspace(mins[0], maxes[0], ys.shape[1]+2)
         plt.figure()
-        plt.plot(xs, [0]+list(ys[0])+[1], c='r')
-        plt.plot(xs, [0]+list(ys[1])+[1], c='g')
-        plt.plot(xs, [0]+list(ys[2])+[1], c='b')
+        for i in range(nax):
+            xs = np.linspace(mins[i], maxes[i], ys.shape[1]+2)
+            plt.plot(xs, [mins[i]]+list(ys[i])+[maxes[i]], label=f'axis {i}')
+        plt.legend()
         plt.savefig(logdir / 'params.png')
         plt.close()
         out_batch = spline(val_img, params_tensor_batch)  # (1, 3, H, W)
@@ -84,7 +91,7 @@ def fit(
 
 
                 if i % 60 == 0:  # dev
-                    validate_image(backbone, spline, val_img, logdir)
+                    validate_image(backbone, spline, val_img, logdir, A)
 
 
                 if profiler:
@@ -104,7 +111,7 @@ def seed_everything(seed):
 if __name__ == "__main__":
     SEED = 0
     lr = 1e-6
-    n_knots = 3
+    n_knots = 8
     batch_size = 4
     n_epochs = 24
     reset = False
@@ -115,13 +122,12 @@ if __name__ == "__main__":
     pr = cProfile.Profile()
     pr.enable()
 
-    A = torch.tensor([[1,0,0], [0,1,0], [0,0,1]
-                      , [1,1,1]
-                      , [-1,-1,1], [-1,1,-1], [1,-1,-1]
-                      ]).float()
+    A = torch.tensor([[1,0,0], [0,1,0], [0,0,1],
+                       [1,1,0], [0,1,1], [1,0,1],
+                      [1,1,1]]).float()
     A = (A / torch.norm(A, dim=1, keepdim=True)).T
     A = A.to(DEVICE)
-    spline = NaturalCubicArbitraryXY(n_knots=n_knots, A=A).to(DEVICE)
+    spline = NaturalCubicArbitraryY(n_knots=n_knots, A=A).to(DEVICE)
     n_params = spline.get_n_params()
     torch._dynamo.config.verbose = True
     spline = torch.compile(spline, mode="reduce-overhead", disable=True)
@@ -150,18 +156,18 @@ if __name__ == "__main__":
     else:
         optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
         loss_fn = torch.nn.MSELoss()
-        initial_params_ys = spline.init_params()['xs'].to(DEVICE)
+        initial_params_ys = spline.init_params()['ys'].to(DEVICE)
         for i, (raw, enh) in enumerate(dataloader):
             raw = raw.to(DEVICE)
             params_tensor = backbone(raw)
             est_params = spline.get_params(params_tensor)
-            loss = loss_fn(est_params['xs'], initial_params_ys) + loss_fn(est_params['ys'], initial_params_ys) + loss_fn(est_params['lambdas'], torch.tensor(0.1))
+            loss = loss_fn(est_params['ys'], initial_params_ys) + loss_fn(est_params['lambdas'], torch.tensor(0.1))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             print("iter", i, loss.item())
             # break  # dev
-            if loss < 0.005:
+            if loss < 0.01:
                 break
 
             torch.save(backbone.state_dict(), "backbone_init.pth")
@@ -178,7 +184,7 @@ if __name__ == "__main__":
     val_img = val_img.resize((448,448))
     val_img = to_tensor(val_img).unsqueeze(0).to(DEVICE)  # (1, 3, H, W)
     # validate_image(idbk, spline, val_img, Path('identity'))
-    validate_image(backbone, spline, val_img, Path('initial'))
+    validate_image(backbone, spline, val_img, Path('initial'), A)
 
     def loss_fn(rgb1, rgb2):
         return torch.norm(rgb2lab(rgb1) - rgb2lab(rgb2), dim=1).mean()
