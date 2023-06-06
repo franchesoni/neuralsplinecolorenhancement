@@ -15,7 +15,7 @@ import torchvision
 from torchvision.transforms.functional import to_tensor
 print('importing local...')
 from dataset import TrainMIT5KDataset
-from splines import TPS2RGBSpline, TPS2RGBSplineXY, SimplestSpline
+from splines import TPS2RGBSpline, TPS2RGBSplineXY, NaturalCubic, NaturalCubicArbitraryXY
 from config import DATASET_DIR, DEVICE
 from ptcolor import squared_deltaE94, rgb2lab
 print('ended imports, starting...')
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     SEED = 0
     lr = 1e-6
     n_knots = 4
-    batch_size = 46
+    batch_size = 4#6
     n_epochs = 24
     reset = False
     import cProfile
@@ -121,7 +121,7 @@ if __name__ == "__main__":
                       ]).float()
     A = (A / torch.norm(A, dim=1, keepdim=True)).T
     A = A.to(DEVICE)
-    spline = SimplestSpline(n_knots=n_knots, A=A).to(DEVICE)
+    spline = NaturalCubicArbitraryXY(n_knots=n_knots, A=A).to(DEVICE)
     n_params = spline.get_n_params()
     torch._dynamo.config.verbose = True
     spline = torch.compile(spline, mode="reduce-overhead", disable=True)
@@ -134,15 +134,13 @@ if __name__ == "__main__":
     # net.fc = torch.nn.Linear(512, n_params)
 
 
-
-
     dataset = TrainMIT5KDataset(datadir=DATASET_DIR)
     assert len(dataset) > 0, "dataset is empty"
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True
     )
     
-    initckpt = "backbone_23.pth"
+    initckpt = "backbone_init_cubic.pth"
 
     if os.path.isfile(initckpt) and not reset:
         state_dict = torch.load(initckpt, map_location=DEVICE)
@@ -161,10 +159,10 @@ if __name__ == "__main__":
             optimizer.step()
             print("iter", i, loss.item())
             # break  # dev
-            if loss < 0.0005:
+            if loss < 0.001:
                 break
 
-            torch.save(backbone.state_dict(), "backbone_init.pth")
+            torch.save(backbone.state_dict(), initckpt)
 
     # class IdentityBackbone(torch.nn.Module):
     #     def forward(self, x):
