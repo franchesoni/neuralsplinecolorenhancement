@@ -87,6 +87,7 @@ def fit(
     n_epochs=144,
     verbose=True,
     profiler=None,
+    exp_avg=False,
 ):
     logger = SummaryWriter()
     logdir = Path(logger.get_logdir())
@@ -96,22 +97,21 @@ def fit(
     val_img = to_tensor(val_img).unsqueeze(0).to(DEVICE)  # (1, 3, H, W)
 
     running_loss = 0
+    if not exp_avg:
+        running_count = 0
     for epoch_idx in range(n_epochs):
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch_idx}") as pbar:
             for i, (raw_batch, target_batch) in enumerate(dataloader):
                 raw_batch, target_batch = raw_batch.to(DEVICE), target_batch.to(DEVICE)
                 params_tensor_batch = backbone(raw_batch)
                 ys = spline.get_params_ys(params_tensor_batch)['ys']  # {'ys':...}
-
                 Areg_loss = ((torch.norm(A, dim=0) - 1)**2).sum()  # unit norm
-
                 params = {'A':A / torch.norm(A, dim=0, keepdim=True), 'ys': ys}
                 out_batch = spline(raw_batch, params)
                 imgdiffloss = loss_fn(out_batch, target_batch)
                 loss = imgdiffloss + Areg_loss
                 # loss += (-params_tensor_batch > 0).sum() * 10
                 # loss += (params_tensor_batch-1 > 0).sum() * 1
-
                 loss.backward()
                 optimizer.step()
                 # scheduler.step()
@@ -120,11 +120,15 @@ def fit(
                 logger.add_scalar("train/loss", loss, epoch_idx * len(dataloader) + i)
                 logger.add_scalar("train/Aregloss", Areg_loss, epoch_idx * len(dataloader) + i)
                 logger.add_scalar("train/imgdiffloss", imgdiffloss, epoch_idx * len(dataloader) + i)
-                # exponential moving average
-                if running_loss == 0:
-                    running_loss = imgdiffloss.item()
+                if exp_avg:
+                    # exponential moving average
+                    if running_loss == 0:
+                        running_loss = imgdiffloss.item()
+                    else:
+                        running_loss = 0.9 * running_loss + 0.1 * loss.item()
                 else:
-                    running_loss = 0.9 * running_loss + 0.1 * imgdiffloss.item()
+                    running_count += 1
+                    running_loss = running_loss * (running_count-1) / running_count + imgdiffloss.item() / running_count
                 pbar.update(1)
                 pbar.set_postfix({"loss": running_loss, "batch": i})
 
@@ -151,10 +155,13 @@ def seed_everything(seed):
 
 if __name__ == "__main__":
     SEED = 0
-    lr = 1e-5
-    n_knots = 8
+    splineclass = AxisSimplestSpline
+    lr = 1e-6
+    n_knots = 4
     batch_size = 46
-    n_epochs = 24
+    n_epochs = 144
+    initckpt = "backbone_23.pth"
+    inittol = 0.001
     reset = False
     import cProfile
 
@@ -163,18 +170,20 @@ if __name__ == "__main__":
     pr = cProfile.Profile()
     pr.enable()
 
+    print('init spline...')
     A = torch.tensor([[1,0,0], [0,1,0], [0,0,1]
-                      , [1,1,1]
-                      , [-1,-1,1], [-1,1,-1], [1,-1,-1]
+                    #   , [1,1,1]
+                    #   , [-1,-1,1], [-1,1,-1], [1,-1,-1]
                       ]).float()
     A = (A / torch.norm(A, dim=1, keepdim=True)).T
     A = A.to(DEVICE)
     A.requires_grad = True
-    spline = AxisSimplestSpline(n_knots=n_knots, n_axis=A.shape[1]).to(DEVICE)
+    spline = splineclass(n_knots=n_knots, n_axis=A.shape[1]).to(DEVICE)
     n_params = spline.get_n_params_ys()  # predict only ys not A
     torch._dynamo.config.verbose = True
     spline = torch.compile(spline, mode="reduce-overhead", disable=True)
 
+    print('init backbone...')
     backbone = torchvision.models.mobilenet_v3_small(num_classes=n_params).to(DEVICE)
     # current_model_dict = backbone.state_dict()
     # loaded_state_dict = torch.load("backbone_23.pth", map_location=DEVICE)
@@ -182,17 +191,14 @@ if __name__ == "__main__":
     # backbone.load_state_dict(new_state_dict, strict=False)
     # net.fc = torch.nn.Linear(512, n_params)
 
-
-
-
+    print('init dataset...')
     dataset = TrainMIT5KDataset(datadir=DATASET_DIR)
     assert len(dataset) > 0, "dataset is empty"
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True
     )
     
-    initckpt = "backbone_23.pth"
-
+    print('init weights...')
     if os.path.isfile(initckpt) and not reset:
         state_dict = torch.load(initckpt, map_location=DEVICE)
         backbone.load_state_dict(state_dict)
@@ -200,21 +206,28 @@ if __name__ == "__main__":
         optimizer = torch.optim.Adam(backbone.parameters(), lr=1e-3)
         loss_fn = torch.nn.MSELoss()
         initial_params = spline.init_params(A)
-        initial_params_ys = initial_params['ys'].to(DEVICE)
+        if 'xs' in initial_params:
+            initial_params_ys = spline.init_params()['xs'].to(DEVICE)
+        else:
+            initial_params_ys = spline.init_params()['ys'].to(DEVICE)
         for i, (raw, enh) in enumerate(dataloader):
             raw = raw.to(DEVICE)
             params_tensor = backbone(raw)
             est_params = spline.get_params(params_tensor)
             loss = loss_fn(est_params['ys'], initial_params_ys)
+            if 'xs' in initial_params:
+                loss += loss_fn(est_params['xs'], initial_params_ys)
+            if 'lambdas' in est_params:
+                loss_fn(est_params['lambdas'], torch.tensor(0.1).to(DEVICE))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             print("iter", i, loss.item())
             # break  # dev
-            if loss < 0.0005:
+            if loss < inittol:
                 break
 
-            torch.save(backbone.state_dict(), "backbone_init.pth")
+            torch.save(backbone.state_dict(), initckpt)
 
     # class IdentityBackbone(torch.nn.Module):
     #     def forward(self, x):
@@ -222,6 +235,7 @@ if __name__ == "__main__":
     
     # idbk = IdentityBackbone().to(DEVICE)
 
+    print('validate weights...')
     # validate over one image
     val_img = Image.open(Path(DATASET_DIR) / "train" / "raw" / "004999.jpg")
     H, W = val_img.height, val_img.width
@@ -235,6 +249,7 @@ if __name__ == "__main__":
         return torch.norm(rgb2lab(rgb1) - rgb2lab(rgb2), dim=1).mean()
         # return squared_deltaE94(rgb2lab(rgb1), rgb2lab(rgb2)).mean()
 
+    print('fit...')
     optimizer = torch.optim.Adam([{'params':backbone.parameters()}, {'params':A}], lr=lr)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(
     #     optimizer,
