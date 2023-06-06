@@ -324,14 +324,14 @@ class NaturalCubicArbitraryXY(AbstractSpline, torch.nn.Module):
         #    xs_control[:, :, None] - xs_control[:, None], axis=3
         #)  #torch.minimum(x1s, x2s)
         K1 = xs_control[:,:,None]*xs_control[:,None,:]*(ms-min_val) - 0.5*(xs_control[:,:,None]+xs_control[:,None,:])*(ms+min_val)**2 + 1/3.0*(ms-min_val)**3
-        M_ = K1 + lparam[:,None]*(torch.eye(xs_control.shape[1])[None,:,:])
+        M_ = K1 + lparam[:,None]*(torch.eye(xs_control.shape[1], device=K1.device)[None,:,:])
         # complement the Gram matrix of representers of evaluation with nullspace functions ("T" in (37))
         # the nullspace has orthonormal basis {1, 1+x} (see remark 2.56)
-        top = torch.cat((M_, torch.ones((B,M,1)), xs_control[:,:,None]), dim=2)
+        top = torch.cat((M_, torch.ones((B,M,1), device=M_.device), xs_control[:,:,None]), dim=2)
         bottom = torch.cat(
             (
-                torch.cat((torch.ones(B,1,M), xs_control[:,:,None].permute(0,2,1)-min_val), dim=1),
-                torch.zeros((B,2,2))), dim=2
+                torch.cat((torch.ones((B,1,M), device=top.device), xs_control[:,:,None].permute(0,2,1)-min_val), dim=1),
+                torch.zeros((B,2,2), device=top.device)), dim=2
             )
         return torch.cat((top, bottom), dim=1)
 
@@ -346,7 +346,7 @@ class NaturalCubicArbitraryXY(AbstractSpline, torch.nn.Module):
         # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
         K1 = xs_control[:,None,:]*xe2[:,:,None]*(ms-min_val) - 0.5*(xs_control[:,None,:]+xe2[:,:,None])*(ms+min_val)**2 + 1/3.0*(ms-min_val)**3
         assert K1.shape == (B, H*W, self.n_knots)
-        return torch.cat((K1, torch.ones((B, H*W, 1)), xe2[:,:,None]), dim=2)
+        return torch.cat((K1, torch.ones((B, H*W, 1), device=K1.device), xe2[:,:,None]), dim=2)
 
     def apply_to_one_channel(self, raw, xs, ys, ls, xsmin=0, xsmax=1):
         # raw is (B, H, W)
@@ -355,9 +355,8 @@ class NaturalCubicArbitraryXY(AbstractSpline, torch.nn.Module):
         B = raw.shape[0]
         kt = self.build_k_train(xs, ls, xsmin)
         kp = self.build_k(raw, xs, xsmin)        
-        out = torch.ones_like(raw) * 99  # placeholder
         B = raw.shape[0]
-        zs = torch.zeros((B, 2, 1)).requires_grad_()
+        zs = torch.zeros((B, 2, 1), device=raw.device)
         ys = ys.reshape((B, self.n_knots, 1))
         return  kp @ torch.linalg.pinv(kt) @ (torch.cat((ys, zs), axis=1))
 
