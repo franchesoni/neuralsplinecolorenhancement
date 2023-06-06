@@ -9,3 +9,4 @@ env*/
 *.pth
 *.jpg
 *.png
+.vscode/
