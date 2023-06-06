@@ -177,28 +177,32 @@ class AxisSimplestSpline(AbstractSpline, torch.nn.Module):
 
     def enhance(self, raw, params):
         # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots), params['A'] is (3, n_axis)
-        assert params['A'].shape[1] == self.n_axis
+        assert params['A'].shape[2] == self.n_axis
         return self.enhance_arbitrary(raw, params)
 
     def enhance_arbitrary(self, raw, params):
         # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
         A = params['A']
-        pinv_axis = torch.linalg.pinv(A)  # (n_axis, 3)
-        mins = torch.sum(A * (A < 0), dim=0)  # (n_axis,)
-        maxs = torch.sum(A * (A > 0), dim=0)
+        pinv_axis = torch.linalg.pinv(A)  # (B, n_axis, 3)
+        mins = torch.sum(A * (A < 0), dim=1)  # (B, n_axis,)
+        maxs = torch.sum(A * (A > 0), dim=1)
 
         B, C, H, W = raw.shape
         assert C == 3
         finput = raw.permute(0, 2, 3, 1)  # (B,H,W,C)
-        finput = finput @ A  # (B,H,W,n_axis)
+        finput = finput.reshape(B, H*W, C)  # (B,H*W,C)
+        finput = torch.bmm(finput, A)  # (B,H*W,n_axis)
+        finput = finput.reshape(B, H, W, self.n_axis)  # (B,H,W,n_axis)
         finput = finput.permute(0, 3, 1, 2)  # (B,n_axis,H,W)
         ys = params['ys']
         estimates = torch.empty((B, self.n_axis, H, W), device=finput.device)
         for axes_ind in range(self.n_axis):
             estimates[:, axes_ind] = self.apply_to_one_channel(finput[:, axes_ind], ys[:, axes_ind],
-                                                               xsmin=mins[axes_ind], xsmax=maxs[axes_ind])
+                                                            xsmin=mins[:, axes_ind], xsmax=maxs[:, axes_ind])
         estimates = estimates.permute(0, 2, 3, 1)  # (B,H,W,n_axis)
-        out = estimates @ pinv_axis  # (B,H,W,3)
+        estimates = estimates.reshape(B, H*W, self.n_axis)  # (B,H*W,n_axis)
+        out = torch.bmm(estimates, pinv_axis)  # (B,H*W,3)
+        out = out.reshape(B, H, W, 3)  # (B,H,W,3)
         # Image.fromarray((np.clip(out[0].detach().numpy(),0,1)*255).astype(np.uint8)).show()
         out = out.permute(0, 3, 1, 2)  # (B,3,H,W)
         return out
@@ -207,12 +211,13 @@ class AxisSimplestSpline(AbstractSpline, torch.nn.Module):
     def apply_to_one_channel(self, raw, ys, xsmin=0, xsmax=1):
         # raw is (B, H, W)
         # ys is (B, knots)
+        # xsmin, xsmax are (B,)
         # add the two extra knots 0 and 1
         eps = 1e-4
-        ys = torch.cat([torch.ones_like(ys[:, :1])*xsmin, ys, torch.ones_like(ys[:, :1])*xsmax], dim=1)  # (B, N+2)
-        xs = torch.linspace(0, 1, self.n_knots+2, device=ys.device)[None] * ((xsmax + eps) - xsmin) + xsmin
-        # xs = torch.linspace(xsmin, xsmax, self.n_knots+2, requires_grad=True)[None].to(ys.device)  # (1, N+2)
-        slopes = torch.diff(ys) / (xs[:, 1] - xs[:, 0])  # (B, N+1)
+        ys = torch.cat([torch.ones_like(ys[:, :1])*xsmin[..., None], ys, torch.ones_like(ys[:, :1])*xsmax[...,None]], dim=1)  # (B, N+2)
+        xs = (torch.linspace(0, 1, self.n_knots+2, device=ys.device)[None] *
+        ((xsmax[...,None] + eps) - xsmin[...,None]) + xsmin[...,None])  # (B, N+2)
+        slopes = (torch.diff(ys, dim=1) / (xs[:, 1] - xs[:, 0])[...,None])
         out = torch.ones_like(raw) * 99  # placeholder
         for i in range(1, self.n_knots+2):
             locations =  (xs[:, i-1, None, None] <= raw) * (raw <= xs[:, i, None, None]) 
@@ -224,6 +229,23 @@ class AxisSimplestSpline(AbstractSpline, torch.nn.Module):
         assert not (out == 99).any()
         return out
 
+
+class AxisPerImageSimplestSpline(AxisSimplestSpline):
+    def get_params(self, params_tensor):
+        nys = self.get_n_params_ys()
+        params_tensor_ys = params_tensor[:, :nys]
+        paramsys = self.get_params_ys(params_tensor_ys)
+        params_tensor_A = params_tensor[:, nys:]
+        paramsA = self.get_params_A(params_tensor_A)
+        params = {**paramsys, **paramsA}
+        return params
+
+    def get_params_A(self, params_tensor):
+        # params_tensor is (B, n_axis*n_knots)
+        B = params_tensor.shape[0]
+        params_tensor = params_tensor.reshape(B, 3, self.n_axis)
+        params = {"A": params_tensor}
+        return params
 
 ## NATURAL CUBIC SPLINE WITH ARBITRARY AXIS, LEARN CONTROL POINTS XS, YS AND LAMBDAS
 
