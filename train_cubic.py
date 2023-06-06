@@ -20,17 +20,24 @@ from config import DATASET_DIR, DEVICE
 from ptcolor import squared_deltaE94, rgb2lab
 print('ended imports, starting...')
 
-def validate_image(backbone, spline, val_img, logdir):
+def validate_image(backbone, spline, val_img, logdir, A=np.eye(3)):
     if not os.path.exists(logdir):
         Path(logdir).mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         params_tensor_batch = backbone(val_img)
         ys = np.array(spline.get_params(params_tensor_batch)['ys'][0].cpu())
-        xs = np.linspace(0, 1, ys.shape[1]+2)
+        if type(A) != type(np.eye(3)):
+            A = A.numpy()
+        print("A", A.shape)
+        maxes = np.sum(np.abs(A), axis=0)
+        mins = np.sum(A*(A<0), axis=0)
+        nch, nax = A.shape
+        xs = np.linspace(mins[0], maxes[0], ys.shape[1]+2)
         plt.figure()
-        plt.plot(xs, [0]+list(ys[0])+[1], c='r')
-        plt.plot(xs, [0]+list(ys[1])+[1], c='g')
-        plt.plot(xs, [0]+list(ys[2])+[1], c='b')
+        for i in range(nax):
+            xs = np.linspace(mins[i], maxes[i], ys.shape[1]+2)
+            plt.plot(xs, [mins[i]]+list(ys[i])+[maxes[i]], label=f'axis {i}')
+        plt.legend()
         plt.savefig(logdir / 'params.png')
         plt.close()
         out_batch = spline(val_img, params_tensor_batch)  # (1, 3, H, W)
@@ -38,6 +45,7 @@ def validate_image(backbone, spline, val_img, logdir):
         outimg = Image.fromarray((out * 255).astype("uint8"))
         outimg = outimg.resize((W, H))
         outimg.save(logdir / 'out.jpg')
+
 
 def fit(
     backbone,
