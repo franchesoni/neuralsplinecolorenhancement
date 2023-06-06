@@ -46,7 +46,6 @@ class AdaptiveGamma(AbstractSpline, torch.nn.Module):
     def get_n_params(self):
         return 1
 
-
 class SimplestSpline(AbstractSpline, torch.nn.Module):
     def __init__(self, n_knots, A=None):
         """
@@ -226,13 +225,345 @@ class AxisSimplestSpline(AbstractSpline, torch.nn.Module):
         return out
 
 
+## NATURAL CUBIC SPLINE WITH ARBITRARY AXIS, LEARN CONTROL POINTS XS, YS AND LAMBDAS
+
+
+
+class NaturalCubicArbitraryXY(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, A=None):
+        super().__init__()
+        self.n_knots = n_knots
+        if A is None:
+            self.n_ch = 3
+            self.A = np.eye(3)
+        else:
+            with torch.no_grad():
+                self.A = A
+                _, self.n_ch = A.shape
+                assert torch.norm(A, dim=0).allclose(torch.ones(self.n_ch, device=A.device)), "axis must be normalized"
+                self.pinv_axis = torch.linalg.pinv(A)  # (n_axis, 3)
+                self.mins = (self.A * (self.A < 0)).sum(dim=0)  # (n_axis,)
+                self.maxs = (self.A * (self.A > 0)).sum(dim=0)
+
+    def init_params(self):
+        if self.A is None:
+            xs = torch.linspace(0, 1, self.n_knots+2)[1:-1][None, None]  # (B, n_knots)
+            ys = torch.linspace(0, 1, self.n_knots+2)[1:-1][None, None]  # (B, n_knots)
+        else:
+            mins, maxs = self.mins, self.maxs
+            ys = torch.empty(1, self.n_ch, self.n_knots)
+            xs = torch.empty(1, self.n_ch, self.n_knots)
+            for i in range(self.n_ch):
+                ys[0,i,:] = torch.linspace(mins[i], maxs[i], self.n_knots+2)[1:-1]
+                xs[0,i,:] = torch.linspace(mins[i], maxs[i], self.n_knots+2)[1:-1]
+        lparam = torch.rand(self.n_ch)/10
+
+        return {"ys": ys, "xs": xs, "lambdas": lparam}
+
+    def get_n_params(self):
+        return self.n_ch * (2*self.n_knots + 1)
+
+    def get_params(self, params_tensor):
+        # params_tensor is (B, n_channels*n_knots)
+        assert params_tensor.shape[-1] == self.get_n_params()
+        B = params_tensor.shape[0]
+        params_tensor_x = params_tensor[:, :self.n_ch*self.n_knots].reshape(B, self.n_ch, self.n_knots)
+        params_tensor_y = params_tensor[:, self.n_ch*self.n_knots:2*self.n_ch*self.n_knots].reshape(B, self.n_ch, self.n_knots)
+        params_tensor_l = params_tensor[:, 2*self.n_ch*self.n_knots:].reshape(B, self.n_ch, 1)
+        params = {"ys": params_tensor_y, "xs": params_tensor_x, "lambdas": params_tensor_l}
+        return params
+
+    def enhance(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        # something sophisticated
+        if self.A is None:
+            return self.enhance_RGB(raw, params)
+        else:
+            return self.enhance_arbitrary(raw, params)
+
+    def enhance_RGB(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        xs = params['xs']
+        ys = params['ys']
+        ls = params['lambdas']
+        out = raw.clone()
+        for channel_ind in range(self.n_ch):
+            out[:, channel_ind] = self.apply_to_one_channel(out[:, channel_ind], xs[:, channel_ind], ys[:, channel_ind], ls[:, channel_ind])
+        return out 
+
+    def enhance_arbitrary(self, raw, params):
+        # x is (B, 3, H, W)  params['ys'] is (B, n_ch, n_knots)
+        B, C, H, W = raw.shape
+        assert C == 3
+        finput = raw.permute(0, 2, 3, 1)  # (B,H,W,C)
+        finput = finput @ self.A  # (B,H,W,n_axis)
+        finput = finput.permute(0, 3, 1, 2)  # (B,n_axis,H,W)
+        xs = params['xs']
+        ys = params['ys']
+        ls = params['lambdas']
+        estimates = torch.empty((B, self.n_ch, H, W), device=finput.device)
+        for axes_ind in range(self.n_ch):
+            estimates[:, axes_ind, :, :] = self.apply_to_one_channel(finput[:, axes_ind], xs[:, axes_ind], ys[:, axes_ind], ls[:, axes_ind], xsmin=self.mins[axes_ind], xsmax=self.maxs[axes_ind]).reshape(B,H,W)
+        estimates = estimates.permute(0, 2, 3, 1)  # (B,H,W,n_axis)
+        out = estimates @ self.pinv_axis  # (B,H,W,3)
+        out = out.permute(0, 3, 1, 2)  # (B,3,H,W)
+        return out
+
+    def build_k_train(self, xs_control, lparam, min_val=0):
+        '''sets up the linear system in equation (37) for the natural cubic spline on [-1,1]
+        as in algorithm 4, but for index set X=[-1,1]
+        '''
+        B = xs_control.shape[0]
+        M = xs_control.shape[1]
+        ms = torch.minimum(xs_control[:,:,None], xs_control[:,None,:])
+        #x1s, x2s = torch.meshgrid(xs_control, xs_control, indexing='ij')
+
+        # compute the kernel k^1 of H_1 (defined in section 2.6.1) elementwise (order m=2) on X=[-1,1]
+        # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
+        #ms =  d = torch.linalg.norm(
+        #    xs_control[:, :, None] - xs_control[:, None], axis=3
+        #)  #torch.minimum(x1s, x2s)
+        K1 = xs_control[:,:,None]*xs_control[:,None,:]*(ms-min_val) - 0.5*(xs_control[:,:,None]+xs_control[:,None,:])*(ms+min_val)**2 + 1/3.0*(ms-min_val)**3
+        M_ = K1 + lparam[:,None]*(torch.eye(xs_control.shape[1])[None,:,:])
+        # complement the Gram matrix of representers of evaluation with nullspace functions ("T" in (37))
+        # the nullspace has orthonormal basis {1, 1+x} (see remark 2.56)
+        top = torch.cat((M_, torch.ones((B,M,1)), xs_control[:,:,None]), dim=2)
+        bottom = torch.cat(
+            (
+                torch.cat((torch.ones(B,1,M), xs_control[:,:,None].permute(0,2,1)-min_val), dim=1),
+                torch.zeros((B,2,2))), dim=2
+            )
+        return torch.cat((top, bottom), dim=1)
+
+    def build_k(self, xs_eval: torch.Tensor, xs_control: torch.Tensor, min_val=0):
+        _, M = xs_control.shape
+        B = xs_eval.shape[0]
+        H, W = xs_eval.shape[1], xs_eval.shape[2]
+        xe2 = xs_eval.clone().reshape(B, H * W)
+        ms = torch.minimum(xs_control[:,None,:], xe2[:,:,None])
+
+        # compute the kernel k^1 of H_1 (defined in section 2.6.1) elementwise (order m=2) on X=[-1,1]
+        # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
+        K1 = xs_control[:,None,:]*xe2[:,:,None]*(ms-min_val) - 0.5*(xs_control[:,None,:]+xe2[:,:,None])*(ms+min_val)**2 + 1/3.0*(ms-min_val)**3
+        assert K1.shape == (B, H*W, self.n_knots)
+        return torch.cat((K1, torch.ones((B, H*W, 1)), xe2[:,:,None]), dim=2)
+
+    def apply_to_one_channel(self, raw, xs, ys, ls, xsmin=0, xsmax=1):
+        # raw is (B, H, W)
+        # ys is (B, knots)
+        # add the two extra knots 0 and 1
+        B = raw.shape[0]
+        kt = self.build_k_train(xs, ls, xsmin)
+        kp = self.build_k(raw, xs, xsmin)        
+        out = torch.ones_like(raw) * 99  # placeholder
+        B = raw.shape[0]
+        zs = torch.zeros((B, 2, 1)).requires_grad_()
+        ys = ys.reshape((B, self.n_knots, 1))
+        return  kp @ torch.linalg.pinv(kt) @ (torch.cat((ys, zs), axis=1))
+
+
+
+
+
+
+
+
+
+
+
+
+
+class NaturalCubic(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, nch=3):
+        super().__init__()
+        self.n_knots = n_knots
+        self.n_ch = nch
+
+    def init_params(self, raw, enh, **kwargs):
+        assert isinstance(raw, torch.Tensor) and isinstance(enh, torch.Tensor)
+        assert raw.shape == (self.n_ch, 448, 448)
+        with torch.no_grad():
+            ts = np.linspace(0, 1, self.n_knots)
+            print("RAW", raw.shape)
+            xs = torch.zeros(0)
+
+            raw = raw.permute(1, 2, 0)  # HxWx3
+            enh = enh.permute(1, 2, 0)  # HxWx3
+
+            r_img = raw.reshape(-1, self.n_ch)
+            e_img = enh.reshape(-1, self.n_ch)
+            M = len(r_img)
+
+            # choose n_knots random knots
+            idxs = np.arange(M)
+            np.random.shuffle(idxs)
+            idxs = idxs[: self.n_knots]
+            xs = r_img[idxs, :]
+            ys = e_img[idxs, :]
+        ys.requires_grad = True
+        xs.requires_grad = True
+        lparam = torch.rand(self.n_ch)/10
+        lparam.requires_grad = True
+        d = {"alphas": ys}
+        return d
+
+    def build_k(self, xs_eval: torch.Tensor, xs_control: torch.Tensor):
+        B = xs_eval.shape[0]
+        M = xs_eval.shape[1]
+        ms = torch.minimum(xs_control[:,None,:], xs_eval[:,:,None])
+        K1 = xs_control[:,None,:]*xs_eval[:,:,None]*ms - 0.5*(xs_control[:,None,:]+xs_eval[:,:,None])*ms**2 + 1/3.0*ms**3
+        assert K1.shape == (B, M, self.n_knots)
+        return torch.cat((K1, torch.ones((B, M, 1)), xs_eval[:,:,None]), dim=2)
+
+    def enhance(self, raw, params):
+        assert raw.shape[1:] == (self.n_ch, 448, 448)
+        assert params['alphas'].shape[1:] == (self.n_knots+2, self.n_ch)
+        assert params['alphas'].shape[0] == raw.shape[0], 'batch size mismatch'
+        B, n_channels, H, W = raw.shape
+        assert n_channels == self.n_ch
+        fimg = raw.clone().reshape(B, H * W, n_channels)
+        out = torch.empty_like(fimg)
+        for i in range(n_channels):
+            K_pred = self.build_k(fimg[:,:,i], params["xs"][:,:,i])
+            alphas = params["alphas"][:, :, i].reshape((B, self.n_knots+2, 1))
+            out1 = K_pred @ alphas
+            out[:, :, i] = out1[..., -1]
+        return out.reshape(raw.shape)  # HxWx3
+
+    def get_params(self, params_tensor):
+        # returns the dict of params from params tensor
+        xs = params_tensor[:, :self.n_ch*self.n_knots].reshape(-1, self.n_knots, self.n_ch)
+        alphas = params_tensor[:, self.n_ch*self.n_knots:].reshape(-1, self.n_knots+2, self.n_ch)
+        return {"xs":xs, "alphas":alphas}
+
+    def get_n_params(self):
+        # returns the number of params given the number of knots
+        return 2*self.n_ch*self.n_knots +2*self.n_ch
+
+class NaturalCubicUniform(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, nch=3):
+        super().__init__()
+        self.n_knots = n_knots
+        self.n_ch = nch
+
+
+
+class NaturalCubicXY(AbstractSpline, torch.nn.Module):
+    def __init__(self, n_knots, nch=3):
+        super().__init__()
+        self.n_knots = n_knots
+        self.n_ch = nch
+    
+    def init_params(self, raw, enh, **kwargs):
+        assert isinstance(raw, torch.Tensor) and isinstance(enh, torch.Tensor)
+        assert raw.shape == (self.n_ch, 448, 448)
+        with torch.no_grad():
+            ts = np.linspace(0, 1, self.n_knots)
+            print("RAW", raw.shape)
+            xs = torch.zeros(0)
+
+            raw = raw.permute(1, 2, 0)  # HxWx3
+            enh = enh.permute(1, 2, 0)  # HxWx3
+
+            r_img = raw.reshape(-1, self.n_ch)
+            e_img = enh.reshape(-1, self.n_ch)
+            M = len(r_img)
+
+            # choose n_knots random knots
+            idxs = np.arange(M)
+            np.random.shuffle(idxs)
+            idxs = idxs[: self.n_knots]
+            xs = r_img[idxs, :]
+            ys = e_img[idxs, :]
+        ys.requires_grad = True
+        xs.requires_grad = True
+        lparam = torch.rand(self.n_ch)/10
+        lparam.requires_grad = True
+        d = {"ys": ys, "xs": xs, "l":lparam}
+        return d
+
+    def build_k_train(self, xs_control, lparam):
+        '''sets up the linear system in equation (37) for the natural cubic spline on [-1,1]
+        as in algorithm 4, but for index set X=[-1,1]
+        '''
+        B = xs_control.shape[0]
+        M = xs_control.shape[1]
+        ms = torch.minimum(xs_control[:,:,None], xs_control[:,None,:])
+        #x1s, x2s = torch.meshgrid(xs_control, xs_control, indexing='ij')
+
+        # compute the kernel k^1 of H_1 (defined in section 2.6.1) elementwise (order m=2) on X=[-1,1]
+        # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
+        #ms =  d = torch.linalg.norm(
+        #    xs_control[:, :, None] - xs_control[:, None], axis=3
+        #)  #torch.minimum(x1s, x2s)
+        K1 = xs_control[:,:,None]*xs_control[:,None,:]*ms - 0.5*(xs_control[:,:,None]+xs_control[:,None,:])*ms**2 + 1/3.0*ms**3
+        M_ = K1 + lparam[:,None, None]*(torch.eye(xs_control.shape[1])[None,:,:])
+    
+        # complement the Gram matrix of representers of evaluation with nullspace functions ("T" in (37))
+        # the nullspace has orthonormal basis {1, 1+x} (see remark 2.56)
+        top = torch.cat((M_, torch.ones((B,M,1)), xs_control[:,:,None]), dim=2)
+        bottom = torch.cat(
+            (
+                torch.cat((torch.ones(B,1,M), xs_control[:,:,None].permute(0,2,1)), dim=1),
+                torch.zeros((B,2,2))), dim=2
+            )
+        return torch.cat((top, bottom), dim=1)
+
+    def build_k(self, xs_eval: torch.Tensor, xs_control: torch.Tensor):
+        B = xs_eval.shape[0]
+        M = xs_eval.shape[1]
+        ms = torch.minimum(xs_control[:,None,:], xs_eval[:,:,None])
+
+        # compute the kernel k^1 of H_1 (defined in section 2.6.1) elementwise (order m=2) on X=[-1,1]
+        # the kernel is defined in equation 43 and the explicit form is given in remark 2.56
+        K1 = xs_control[:,None,:]*xs_eval[:,:,None]*ms - 0.5*(xs_control[:,None,:]+xs_eval[:,:,None])*ms**2 + 1/3.0*ms**3
+
+        assert K1.shape == (B, M, self.n_knots)
+        return torch.cat((K1, torch.ones((B, M, 1)), xs_eval[:,:,None]), dim=2)
+
+    def enhance(self, raw, params):
+        # raw is (B, 3, H, W)  params['ys'] is (B, n_experts, n_channels,
+        # n_knots); params['xs'] is (B, n_experts, n_channels, n_knots);
+        # params['lambdas'] is (B, n_experts, n_channels, 1);
+        # we have n_knots total control points -- the same ones in each
+        # channel -- and 3 lambdas
+        assert raw.shape[1:] == (self.n_ch, 448, 448)
+        assert params['xs'].shape[1:] == (self.n_knots, self.n_ch)
+        assert params['xs'].shape[0] == raw.shape[0], 'batch size mismatch'
+        B, n_channels, H, W = raw.shape
+        assert n_channels == self.n_ch
+        fimg = raw.clone().reshape(B, H * W, n_channels)
+        out = torch.empty_like(fimg)
+        for i in range(n_channels):
+            lambda_param = params["lambdas"][:, i]  # (B, 3) to (B,)
+            K_pred = self.build_k(fimg[:,:,i], params["xs"][:,:,i])
+            K_ch_i = self.build_k_train(
+                params["xs"][:,:,i], lparam=lambda_param
+            )
+            B, n_knots, n_channels = params["xs"].shape
+            zs = torch.zeros((B, 2, 1)).requires_grad_()
+            ys = params["ys"][:, :, i].reshape((B, n_knots, 1))
+            out1 = K_pred @ torch.linalg.pinv(K_ch_i) @ (torch.cat((ys, zs), axis=1))
+            out[:, :, i] = out1[..., -1]
+        return out.reshape(raw.shape)  # HxWx3
+
+    def get_params(self, params_tensor):
+        # returns the dict of params from params tensor
+        xs = params_tensor[:, :self.n_ch*self.n_knots].reshape(-1, self.n_knots, self.n_ch)
+        ys = params_tensor[:, self.n_ch*self.n_knots:2*self.n_ch*self.n_knots].reshape(-1, self.n_knots, self.n_ch)
+        lambdas = params_tensor[:, 2*self.n_ch*self.n_knots:].reshape(-1, self.n_ch)
+        return {"xs":xs, "ys":ys, "lambdas":lambdas}
+
+    def get_n_params(self):
+        # returns the number of params given the number of knots
+        return self.n_ch*(2*self.n_knots + 1)
 
 
 class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
-    def __init__(self, n_knots):
+    def __init__(self, n_knots, n_ch=3):
         super().__init__()
         self.n_knots = n_knots
-        self.n_ch = 3
+        self.n_ch = n_ch
 
     def init_params(self, raw, enh, d_null=4, **kwargs):
         self.n_ch = d_null-1
@@ -242,8 +573,8 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
             raw = raw.permute(1, 2, 0)  # HxWx3
             enh = enh.permute(1, 2, 0)  # HxWx3
 
-            r_img = raw.reshape(-1, 3)
-            e_img = enh.reshape(-1, 3)
+            r_img = raw.reshape(-1, self.n_ch)
+            e_img = enh.reshape(-1, self.n_ch)
             M = len(r_img)
 
             # choose n_knots random knots
@@ -255,7 +586,6 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
             ys = e_img[idxs, :]
         ys.requires_grad = True
         xs.requires_grad = True
-        print("XS", xs.shape)
         lparam = torch.rand(self.n_ch)/10
         lparam.requires_grad = True
         d = {"ys": ys, "xs": xs, "l":lparam}
@@ -301,7 +631,7 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
         # params['lambdas'] is (B, n_experts, n_channels, 1);
         # we have n_knots total control points -- the same ones in each
         # channel -- and 3 lambdas
-        assert raw.shape[1:] == (3, 448, 448)
+        assert raw.shape[1:] == (self.n_ch, 448, 448)
         assert params['xs'].shape[1:] == (self.n_knots, self.n_ch)
         assert params['xs'].shape[0] == raw.shape[0], 'batch size mismatch'
         B, n_channels, H, W = raw.shape
@@ -325,44 +655,29 @@ class TPS2RGBSplineXY(AbstractSpline, torch.nn.Module):
     def get_params(self, params_tensor):
         # returns the dict of params from params tensor
         n_knots = self.n_knots
-        xs = params_tensor[:, :3*n_knots].reshape(-1, n_knots, 3)
-        ys = params_tensor[:, 3*n_knots:6*n_knots].reshape(-1, n_knots, 3)
-        lambdas = params_tensor[:, 6*n_knots:].reshape(-1, 3)
+        xs = params_tensor[:, :self.n_ch*self.n_knots].reshape(-1, self.n_knots, self.n_ch)
+        ys = params_tensor[:, self.n_ch*self.n_knots:2*self.n_ch*self.n_knots].reshape(-1, self.n_knots, self.n_ch)
+        lambdas = params_tensor[:, 2*self.n_ch*n_knots:].reshape(-1, self.n_ch)
         return {"xs":xs, "ys":ys, "lambdas":lambdas}
 
     def get_n_params(self):
         # returns the number of params given the number of knots
-        return (3*(2*self.n_knots)) + 3
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        return self.n_ch*(2*self.n_knots + 1)
 
 class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
-    def __init__(self, n_knots=10):
+    def __init__(self, n_knots=10, n_ch=3):
         super().__init__()
         self.n_knots = n_knots
+        self.n_ch = n_ch
 
     def init_params(self, raw, enh, lparam=1., d_null=4, **kwargs):
         assert isinstance(raw, torch.Tensor) and isinstance(enh, torch.Tensor)
-        assert raw.shape == (3, 448, 448)
+        assert raw.shape == (self.n_ch, 448, 448)
         with torch.no_grad():
             raw = raw.permute(1, 2, 0)  # HxWx3
             enh = enh.permute(1, 2, 0)  # HxWx3
 
-            r_img = raw.reshape(-1, 3)
+            r_img = raw.reshape(-1, self.n_ch)
             e_img = enh.reshape(-1, 3)
             M = len(r_img)
 
@@ -374,7 +689,7 @@ class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
             K = self.build_k_train(r_img[idxs, :], lparam=lparam)
             print("K", K.shape)
             print("e_img", e_img[idxs, :].shape)
-            y = torch.vstack((e_img[idxs, :], torch.zeros((d_null, 3))))
+            y = torch.vstack((e_img[idxs, :], torch.zeros((d_null, self.n_ch))))
             alphas = torch.linalg.pinv(K) @ y
         alphas.requires_grad = True
         xs = r_img[idxs, :]
@@ -402,8 +717,8 @@ class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
         return torch.vstack((top, bottom))
 
     def enhance(self, raw, params):
-        assert raw.shape[1:] == (3, 448, 448)
-        assert params['xs'].shape[1:] == (self.n_knots, 3)
+        assert raw.shape[1:] == (self.n_ch, 448, 448)
+        assert params['xs'].shape[1:] == (self.n_knots, self.n_ch)
         assert params['xs'].shape[0] == raw.shape[0], 'batch size mismatch'
         raw = raw.permute(0, 2, 3, 1)  # HxWx3
         # MAYBE THIS RESHAPING IS WRONG
@@ -428,13 +743,13 @@ class TPS2RGBSpline(AbstractSpline, torch.nn.Module):
     def get_params(self, params_tensor):
         # returns the dict of params from params tensor
         n_knots = self.n_knots
-        alphas = params_tensor[:, :3*(n_knots+4)].reshape(-1, n_knots+4, 3)
-        xs = params_tensor[:, 3*(n_knots+4):].reshape(-1, n_knots, 3)
+        alphas = params_tensor[:, :self.n_ch*(n_knots+self.n_ch+1)].reshape(-1, self.n_knots+self.n_ch+1, self.n_ch)
+        xs = params_tensor[:, self.n_ch*(self.n_knots+self.n_ch+1):].reshape(-1, self.n_knots, self.n_ch)
         return {"alphas": alphas, "xs": xs}
 
     def get_n_params(self):
         # returns the number of params given the number of knots
-        return (3*(self.n_knots+4)) + (3*self.n_knots)
+        return self.n_ch*(self.n_knots+self.n_ch+1) + self.n_ch*self.n_knots
 
 
 
